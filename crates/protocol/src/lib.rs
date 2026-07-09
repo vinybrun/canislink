@@ -175,3 +175,120 @@ mod tests {
         assert_eq!(ForceBand::from_newtons(120.0), ForceBand::Medium);
     }
 }
+
+// --- Invites / sessions (Feature: Call) ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct InviteId(pub Uuid);
+
+impl InviteId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for InviteId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for InviteId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionId(pub Uuid);
+
+impl SessionId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for SessionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InviteMode {
+    Portal,
+    PlayActive,
+}
+
+/// Architecture: ring timeout 25s.
+pub const RING_TIMEOUT_MS: u64 = 25_000;
+/// Minimum mutual bond weight.
+pub const W_MIN: f32 = 0.30;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Invite {
+    pub id: InviteId,
+    pub from_dog: DogId,
+    pub to_dog: DogId,
+    pub mode: InviteMode,
+    pub state: SessionState,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CreateInviteRequest {
+    pub mode: InviteMode,
+    /// Optional preferred peer; if None, cloud picks K=1 best present mutual bond.
+    pub to_dog: Option<DogId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CreateInviteResponse {
+    pub invite: Invite,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IncomingInviteOffer {
+    pub invite: Invite,
+    /// Dog-native lure config
+    pub lure: LureConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LureConfig {
+    pub max_repeats: u8,
+    pub audio_ms: u16,
+    pub led_pattern: String,
+}
+
+impl Default for LureConfig {
+    fn default() -> Self {
+        Self {
+            max_repeats: 3,
+            audio_ms: 2000,
+            led_pattern: "slow_pulse_blue".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InviteCloseReason {
+    Accepted,
+    IgnoredTimeout,
+    CallerCancel,
+    PeerBusy,
+    NotEligible,
+    PolicyDenied,
+    PeerOffline,
+}

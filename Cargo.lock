@@ -176,6 +176,10 @@ dependencies = [
 [[package]]
 name = "bond"
 version = "0.1.0"
+dependencies = [
+ "protocol",
+ "serde",
+]
 
 [[package]]
 name = "bumpalo"
@@ -382,8 +386,10 @@ dependencies = [
 name = "db"
 version = "0.1.0"
 dependencies = [
+ "bond",
  "chrono",
  "dashmap",
+ "parking_lot",
  "protocol",
  "serde",
 ]
@@ -394,13 +400,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bond",
  "chrono",
  "clap",
  "db",
  "device-auth",
+ "parking_lot",
  "protocol",
  "serde",
  "serde_json",
+ "session",
  "tokio",
  "tower-http",
  "tracing",
@@ -447,6 +456,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bond",
  "canis-edge",
  "canis-sense",
  "chrono",
@@ -458,6 +468,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "session",
  "tokio",
  "tower-http",
  "tracing",
@@ -968,6 +979,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "parking_lot"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
+dependencies = [
+ "lock_api",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "parking_lot_core"
 version = "0.9.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1344,6 +1365,13 @@ dependencies = [
 [[package]]
 name = "session"
 version = "0.1.0"
+dependencies = [
+ "bond",
+ "chrono",
+ "protocol",
+ "serde",
+ "thiserror",
+]
 
 [[package]]
 name = "sha2"

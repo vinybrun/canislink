@@ -1,9 +1,12 @@
 //! In-memory stores for early production path.
-//! Redis-backed presence lands later; this is correct w.r.t. TTL semantics.
 
+use bond::BondGraph;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use protocol::{DogId, ForceBand, PresenceReport, PresenceView, TerminalId, PRESENCE_TTL_MS};
+use parking_lot::Mutex;
+use protocol::{
+    DogId, ForceBand, Invite, InviteId, PresenceReport, PresenceView, TerminalId, PRESENCE_TTL_MS,
+};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -31,7 +34,6 @@ impl PresenceStore {
         match self.inner.entry(report.dog_id) {
             Entry::Occupied(mut o) => {
                 let e = o.get_mut();
-                // Ignore stale seq
                 if report.seq < e.seq {
                     return;
                 }
@@ -81,6 +83,88 @@ impl PresenceStore {
             .filter_map(|r| self.get(*r.key(), now))
             .filter(|v| v.present)
             .collect()
+    }
+
+    pub fn present_dog_ids(&self, now: DateTime<Utc>) -> Vec<DogId> {
+        self.list_present(now)
+            .into_iter()
+            .map(|v| v.dog_id)
+            .collect()
+    }
+
+    pub fn is_present(&self, dog_id: DogId, now: DateTime<Utc>) -> bool {
+        self.get(dog_id, now).map(|v| v.present).unwrap_or(false)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct InviteStore {
+    by_id: Mutex<std::collections::HashMap<InviteId, Invite>>,
+    /// dog -> open invite they initiated or are receiving
+    open_for_dog: Mutex<std::collections::HashMap<DogId, InviteId>>,
+}
+
+impl InviteStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&self, invite: Invite) -> Result<(), &'static str> {
+        let mut open = self.open_for_dog.lock();
+        if open.contains_key(&invite.from_dog) || open.contains_key(&invite.to_dog) {
+            return Err("busy");
+        }
+        open.insert(invite.from_dog, invite.id);
+        open.insert(invite.to_dog, invite.id);
+        self.by_id.lock().insert(invite.id, invite);
+        Ok(())
+    }
+
+    pub fn get(&self, id: InviteId) -> Option<Invite> {
+        self.by_id.lock().get(&id).cloned()
+    }
+
+    pub fn for_dog(&self, dog: DogId) -> Option<Invite> {
+        let open = self.open_for_dog.lock();
+        let id = open.get(&dog)?;
+        self.by_id.lock().get(id).cloned()
+    }
+
+    pub fn incoming_for(&self, dog: DogId) -> Option<Invite> {
+        self.for_dog(dog)
+            .filter(|i| i.to_dog == dog && i.state == protocol::SessionState::Ringing)
+    }
+
+    pub fn close(&self, id: InviteId) -> Option<Invite> {
+        let inv = self.by_id.lock().remove(&id)?;
+        let mut open = self.open_for_dog.lock();
+        open.remove(&inv.from_dog);
+        open.remove(&inv.to_dog);
+        Some(inv)
+    }
+
+    pub fn expire_due(&self, now: DateTime<Utc>) -> Vec<Invite> {
+        let due: Vec<InviteId> = self
+            .by_id
+            .lock()
+            .iter()
+            .filter(|(_, i)| now >= i.expires_at)
+            .map(|(id, _)| *id)
+            .collect();
+        due.into_iter().filter_map(|id| self.close(id)).collect()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct AppData {
+    pub presence: PresenceStore,
+    pub bonds: Mutex<BondGraph>,
+    pub invites: InviteStore,
+}
+
+impl AppData {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 

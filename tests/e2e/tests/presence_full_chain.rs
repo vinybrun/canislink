@@ -156,7 +156,7 @@ impl Term {
     async fn drive(&mut self, ticks: usize, publish_every: usize) {
         for i in 0..ticks {
             let bytes = self.mcu.tick_50ms();
-            let snaps = self.edge.ingest_uart(&bytes, 50);
+            let (snaps, _intents) = self.edge.ingest_uart(&bytes, 50);
             let flip = snaps.iter().any(|s| s.flipped);
             if flip || (i + 1) % publish_every == 0 {
                 self.edge.publish_now().await.expect("publish");

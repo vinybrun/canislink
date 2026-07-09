@@ -9,3 +9,5 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+protocol = { workspace = true }
+serde = { workspace = true }

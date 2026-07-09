@@ -1,6 +1,6 @@
 [package]
 name = "canis-edge"
-description = "CanisLink edge agent (presence publish)"
+description = "CanisLink edge agent (presence + call)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

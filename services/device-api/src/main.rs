@@ -1,4 +1,4 @@
-//! Device API — presence heartbeats (Feature: Presence).
+//! Device API — presence + call invites.
 
 use axum::{
     extract::{Path, State},
@@ -8,10 +8,15 @@ use axum::{
 };
 use chrono::Utc;
 use clap::Parser;
-use db::PresenceStore;
+use db::AppData;
 use device_auth::SharedSecretAuthority;
-use protocol::{DogId, PresenceReport, PresenceView, TerminalId};
+use protocol::{
+    CreateInviteRequest, CreateInviteResponse, DogId, IncomingInviteOffer, InviteMode, LureConfig,
+    PresenceReport, PresenceView, TerminalId,
+};
 use serde::{Deserialize, Serialize};
+use session::{new_invite, route_invite, InviteError};
+use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use uuid::Uuid;
@@ -27,19 +32,13 @@ struct Args {
 
 #[derive(Clone)]
 struct AppState {
-    presence: PresenceStore,
+    data: Arc<AppData>,
     auth: SharedSecretAuthority,
 }
 
 #[derive(Debug, Serialize)]
 struct ErrorBody {
     error: String,
-}
-
-#[derive(Debug, Serialize)]
-struct Health {
-    ok: bool,
-    service: &'static str,
 }
 
 #[tokio::main]
@@ -53,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
     let state = AppState {
-        presence: PresenceStore::new(),
+        data: Arc::new(AppData::new()),
         auth: SharedSecretAuthority::new(args.device_secret),
     };
 
@@ -66,19 +65,19 @@ async fn main() -> anyhow::Result<()> {
 
 fn router(state: AppState) -> Router {
     Router::new()
-        .route("/healthz", get(healthz))
+        .route(
+            "/healthz",
+            get(|| async { Json(serde_json::json!({"ok": true})) }),
+        )
         .route("/v1/presence", post(post_presence).get(list_presence))
         .route("/v1/presence/{dog_id}", get(get_presence))
         .route("/v1/dev/enroll", post(dev_enroll))
+        .route("/v1/dev/bonds", post(dev_bootstrap_bond))
+        .route("/v1/invites", post(create_invite))
+        .route("/v1/invites/incoming", get(incoming_invite))
+        .route("/v1/invites/{invite_id}/cancel", post(cancel_invite))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
-}
-
-async fn healthz() -> Json<Health> {
-    Json(Health {
-        ok: true,
-        service: "device-api",
-    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,7 +93,6 @@ struct EnrollResponse {
     token: String,
 }
 
-/// Lab-only enrollment (shared secret issuer). Production uses mTLS provision.
 async fn dev_enroll(
     State(state): State<AppState>,
     Json(body): Json<EnrollRequest>,
@@ -107,6 +105,30 @@ async fn dev_enroll(
         dog_id: id.dog_id,
         token: id.token,
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct BondBootstrap {
+    dog_a: Uuid,
+    dog_b: Uuid,
+    #[serde(default = "default_weight")]
+    weight: f32,
+}
+
+fn default_weight() -> f32 {
+    0.5
+}
+
+async fn dev_bootstrap_bond(
+    State(state): State<AppState>,
+    Json(body): Json<BondBootstrap>,
+) -> StatusCode {
+    state
+        .data
+        .bonds
+        .lock()
+        .bootstrap_mutual(DogId(body.dog_a), DogId(body.dog_b), body.weight);
+    StatusCode::NO_CONTENT
 }
 
 fn extract_device_token(headers: &HeaderMap) -> Result<(TerminalId, String), StatusCode> {
@@ -135,7 +157,6 @@ async fn post_presence(
             }),
         )
     })?;
-
     if terminal_id != report.terminal_id {
         return Err((
             StatusCode::FORBIDDEN,
@@ -144,7 +165,6 @@ async fn post_presence(
             }),
         ));
     }
-
     state
         .auth
         .verify_pair(report.terminal_id, report.dog_id, &token)
@@ -156,8 +176,9 @@ async fn post_presence(
                 }),
             )
         })?;
-
-    state.presence.upsert(report);
+    state.data.presence.upsert(report);
+    // expire invites opportunistically
+    state.data.invites.expire_due(Utc::now());
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -165,14 +186,238 @@ async fn get_presence(
     State(state): State<AppState>,
     Path(dog_id): Path<Uuid>,
 ) -> Result<Json<PresenceView>, StatusCode> {
-    let dog = DogId(dog_id);
     state
+        .data
         .presence
-        .get(dog, Utc::now())
+        .get(DogId(dog_id), Utc::now())
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
 }
 
 async fn list_presence(State(state): State<AppState>) -> Json<Vec<PresenceView>> {
-    Json(state.presence.list_present(Utc::now()))
+    Json(state.data.presence.list_present(Utc::now()))
+}
+
+/// Caller identity is derived from device token + presence report dog binding.
+/// Client sends Authorization and body `{ mode, to_dog?, dog_id, terminal_id }`.
+#[derive(Debug, Deserialize)]
+struct CreateInviteBody {
+    #[serde(flatten)]
+    req: CreateInviteRequest,
+    dog_id: DogId,
+    terminal_id: TerminalId,
+}
+
+async fn create_invite(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<CreateInviteBody>,
+) -> Result<Json<CreateInviteResponse>, (StatusCode, Json<ErrorBody>)> {
+    let (terminal_id, token) = extract_device_token(&headers).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody {
+                error: "unauthorized".into(),
+            }),
+        )
+    })?;
+    if terminal_id != body.terminal_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorBody {
+                error: "terminal mismatch".into(),
+            }),
+        ));
+    }
+    state
+        .auth
+        .verify_pair(body.terminal_id, body.dog_id, &token)
+        .map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorBody {
+                    error: "invalid token".into(),
+                }),
+            )
+        })?;
+
+    let now = Utc::now();
+    state.data.invites.expire_due(now);
+
+    if state.data.invites.for_dog(body.dog_id).is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorBody {
+                error: "caller busy".into(),
+            }),
+        ));
+    }
+
+    let present_ids = state.data.presence.present_dog_ids(now);
+    let caller_present = state.data.presence.is_present(body.dog_id, now);
+    let bonds = state.data.bonds.lock();
+    let to = route_invite(
+        body.dog_id,
+        body.req.to_dog,
+        &bonds,
+        &present_ids,
+        caller_present,
+    )
+    .map_err(|e| {
+        let code = match e {
+            InviteError::CallerNotPresent => StatusCode::PRECONDITION_FAILED,
+            InviteError::NoEligiblePeer | InviteError::PeerNotPresent => StatusCode::NOT_FOUND,
+            InviteError::NotBonded => StatusCode::FORBIDDEN,
+            InviteError::CallerBusy | InviteError::PeerBusy => StatusCode::CONFLICT,
+        };
+        (
+            code,
+            Json(ErrorBody {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    drop(bonds);
+
+    if state.data.invites.for_dog(to).is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorBody {
+                error: "peer busy".into(),
+            }),
+        ));
+    }
+
+    let mode = body.req.mode;
+    let invite = new_invite(body.dog_id, to, mode);
+    state.data.invites.insert(invite.clone()).map_err(|_| {
+        (
+            StatusCode::CONFLICT,
+            Json(ErrorBody {
+                error: "busy".into(),
+            }),
+        )
+    })?;
+
+    info!(
+        from = %invite.from_dog,
+        to = %invite.to_dog,
+        id = %invite.id,
+        "invite ringing"
+    );
+    Ok(Json(CreateInviteResponse { invite }))
+}
+
+#[derive(Debug, Deserialize)]
+struct IncomingQuery {
+    dog_id: Uuid,
+    terminal_id: Uuid,
+}
+
+async fn incoming_invite(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<IncomingQuery>,
+) -> Result<Json<Option<IncomingInviteOffer>>, (StatusCode, Json<ErrorBody>)> {
+    let (terminal_id, token) = extract_device_token(&headers).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody {
+                error: "unauthorized".into(),
+            }),
+        )
+    })?;
+    let dog_id = DogId(q.dog_id);
+    let tid = TerminalId(q.terminal_id);
+    if tid != terminal_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorBody {
+                error: "terminal mismatch".into(),
+            }),
+        ));
+    }
+    state.auth.verify_pair(tid, dog_id, &token).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody {
+                error: "invalid token".into(),
+            }),
+        )
+    })?;
+
+    state.data.invites.expire_due(Utc::now());
+    let offer = state
+        .data
+        .invites
+        .incoming_for(dog_id)
+        .map(|invite| IncomingInviteOffer {
+            invite,
+            lure: LureConfig::default(),
+        });
+    Ok(Json(offer))
+}
+
+async fn cancel_invite(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(invite_id): Path<Uuid>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    let (terminal_id, token) = extract_device_token(&headers).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody {
+                error: "unauthorized".into(),
+            }),
+        )
+    })?;
+    let dog_id = body
+        .get("dog_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .map(DogId)
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: "dog_id required".into(),
+            }),
+        ))?;
+    state
+        .auth
+        .verify_pair(terminal_id, dog_id, &token)
+        .map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorBody {
+                    error: "invalid token".into(),
+                }),
+            )
+        })?;
+    let id = protocol::InviteId(invite_id);
+    if let Some(inv) = state.data.invites.get(id) {
+        if inv.from_dog != dog_id && inv.to_dog != dog_id {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorBody {
+                    error: "not party to invite".into(),
+                }),
+            ));
+        }
+        state.data.invites.close(id);
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: "not found".into(),
+            }),
+        ))
+    }
+}
+
+// silence unused import warning if InviteMode only used via body
+#[allow(dead_code)]
+fn _mode() -> InviteMode {
+    InviteMode::Portal
 }

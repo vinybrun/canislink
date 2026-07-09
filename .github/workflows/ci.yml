@@ -27,7 +27,12 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
-      - name: e2e presence
-        run: cargo test -p e2e --test presence_full_chain -- --nocapture
+      - name: e2e presence + call
+        run: |
+          cargo test -p e2e --test presence_full_chain -- --nocapture
+          cargo test -p e2e --test call_invite_full_chain -- --nocapture
       - name: scad present
-        run: test -s hardware/enclosure/terminal_base.scad && test -s hardware/enclosure/button_pad.scad
+        run: |
+          test -s hardware/enclosure/terminal_base.scad
+          test -s hardware/enclosure/button_pad.scad
+          test -s hardware/enclosure/lure_bezel.scad
