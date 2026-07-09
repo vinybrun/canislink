@@ -1,6 +1,6 @@
 [package]
 name = "presence"
-description = "Live presence key contract helpers"
+description = "Presence sensor fusion and debounce"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,5 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+protocol = { workspace = true }
+serde = { workspace = true }

@@ -1,6 +1,6 @@
 [package]
 name = "canis-edge"
-description = "CanisLink edge binary: canis-edge"
+description = "CanisLink edge agent (presence publish)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,4 +8,25 @@ repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "canis_edge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "canis-edge"
+path = "src/main.rs"
+
 [dependencies]
+protocol = { workspace = true }
+presence = { workspace = true }
+canis-sense = { path = "../canis-sense" }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }

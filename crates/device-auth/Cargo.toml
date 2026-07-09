@@ -1,6 +1,6 @@
 [package]
 name = "device-auth"
-description = "Device mTLS identity and cert lifecycle"
+description = "Device identity and auth (dev shared-secret; mTLS later)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,9 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+protocol = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+sha2 = "0.10"
+hex = "0.4"

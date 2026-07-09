@@ -1,6 +1,6 @@
 [package]
 name = "db"
-description = "Postgres access and migrations helpers"
+description = "Data stores (in-memory presence registry for v1)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,7 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+protocol = { workspace = true }
+chrono = { workspace = true }
+dashmap = { workspace = true }
+serde = { workspace = true }

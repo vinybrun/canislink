@@ -1,6 +1,6 @@
 [package]
-name = "canis-sense"
-description = "MCU UART ingest + presence fusion"
+name = "mcu-emu"
+description = "Host-side MCU emulator (UART sense + buttons)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,16 +9,15 @@ authors.workspace = true
 rust-version.workspace = true
 
 [lib]
-name = "canis_sense"
+name = "mcu_emu"
 path = "src/lib.rs"
 
 [[bin]]
-name = "canis-sense"
+name = "mcu-emu"
 path = "src/main.rs"
 
 [dependencies]
 protocol = { workspace = true }
-presence = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

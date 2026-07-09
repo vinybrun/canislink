@@ -1,50 +1,42 @@
 # CanisLink
 
-Dog-to-dog social portal network: standalone terminals where dogs initiate, accept, sustain, and end remote social contact — **with no human in the session protocol**.
+**Dog-to-dog social portal network** — standalone terminals where dogs initiate, accept, sustain, and end remote social contact with **no human in the session protocol**.
 
 Humans are infrastructure only (purchase, power, install, billing, emergency stop).
 
-## Status
+## Repo
 
-Founding architecture approved (Draft 0.3.0). Implementation follows the PR plan in:
+Public monorepo: Rust cloud + edge, MCU emulator/firmware reference, hardware docs, OpenSCAD enclosure models.
+
+## Features
+
+| # | Feature | Status | Doc |
+|---|---------|--------|-----|
+| 01 | **Presence** (mat → MCU → edge → cloud) | implemented | [docs/features/01-presence.md](docs/features/01-presence.md) |
+| 02 | Call invite | next | — |
+| 03 | Accept + session | planned | — |
+
+## Quick start
+
+```bash
+cargo test --workspace
+cargo test -p e2e --test presence_full_chain
+
+# Full dual-dog simulation
+cargo run -p device-api -- --bind 127.0.0.1:8080 &
+cargo run -p sim-dog -- --api http://127.0.0.1:8080
+```
+
+## Architecture
 
 - [`docs/architecture/canislink-system-architecture.md`](docs/architecture/canislink-system-architecture.md)
 
-## Architecture (one monorepo)
+## Hardware / 3D
 
-| Area | Path |
-|------|------|
-| Shared Rust crates | `crates/` |
-| Cloud services | `services/` |
-| Edge (SBC) binaries | `edge/` |
-| MCU firmware | `firmware/mcu/` |
-| Hardware docs / BOM | `hardware/` |
-| Deploy (compose, CA, TURN) | `deploy/` |
-| Tools (sim-dog, provision) | `tools/` |
-| E2E / conformance | `tests/` |
-| Architecture & protocols | `docs/` |
-
-## Product thesis
-
-```text
-Dog A present → Call/Play → lure on eligible peer terminal
-  → Dog B engages (accept) or ignores (refuse)
-  → WebRTC portal session
-  → Done / walk-away / segment expiry ends
-```
-
-No owner push-to-accept. Receiver UX is dog-native (LED + short audio).
-
-## Quick start (dev)
-
-```bash
-# Requires: Rust stable (see rust-toolchain.toml), Docker (for later compose stack)
-cargo check --workspace
-cargo test --workspace
-```
-
-Cloud + dual-terminal simulation land in early PRs (`tools/sim-dog`). Hardware lab is later.
+- Electronics: `hardware/electronics/presence_mat.md`
+- OpenSCAD: `hardware/enclosure/*.scad`
+- BOM: `hardware/bom/prototype.csv`
 
 ## License
 
-TBD — all rights reserved until a license is chosen.
+MIT OR Apache-2.0
