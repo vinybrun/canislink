@@ -1,5 +1,4 @@
-//! Edge binary — demo loop with synthetic mat (for local bring-up).
-//! Production reads UART via canis-sense; sim-dog drives EdgeAgent in-process.
+//! Edge binary demo — synthetic mat bring-up.
 
 use canis_edge::{EdgeAgent, EdgeConfig};
 use clap::Parser;
@@ -17,7 +16,6 @@ struct Args {
     dog_id: Uuid,
     #[arg(long)]
     token: String,
-    /// Simulate dog on mat after N ms.
     #[arg(long, default_value_t = 1000)]
     step_on_ms: u64,
 }
@@ -35,17 +33,26 @@ async fn main() -> anyhow::Result<()> {
         token: args.token,
         publish_ms: 2000,
     });
-
     let mut elapsed = 0u64;
     loop {
         let on_mat = elapsed >= args.step_on_ms;
-        let force = if on_mat { 120.0 } else { 0.0 };
-        let tof = if on_mat { Some(400) } else { Some(2000) };
-        let snap = agent.ingest_sample(force, tof, on_mat, 100);
-        if snap.flipped {
-            info!(present = snap.present, "local presence flipped");
-            agent.publish_now().await?;
-        } else if elapsed % 2000 == 0 {
+        // Build synthetic sense frame via mcu path
+        use mcu_emu::{McuEmu, McuWorld};
+        // lightweight: use canis_sense via empty uart + direct - use publish from filter by driving sense
+        // Directly tick presence through a local mcu frame
+        let mut emu = McuEmu::new();
+        if on_mat {
+            emu.set_world(McuWorld::dog_on_mat(120.0));
+        }
+        let bytes = emu.tick_50ms();
+        let (snaps, _) = agent.ingest_uart(&bytes, 100);
+        for s in snaps {
+            if s.flipped {
+                info!(present = s.present, "presence flipped");
+                agent.publish_now().await?;
+            }
+        }
+        if elapsed % 2000 == 0 {
             agent.publish_now().await?;
         }
         elapsed += 100;

@@ -16,6 +16,7 @@ db = { workspace = true }
 presence = { workspace = true }
 bond = { workspace = true }
 session = { workspace = true }
+policy = { workspace = true }
 canis-edge = { path = "../../edge/canis-edge" }
 canis-sense = { path = "../../edge/canis-sense" }
 mcu-emu = { path = "../../firmware/mcu-emu" }

@@ -1,6 +1,6 @@
 [package]
 name = "canis-edge"
-description = "CanisLink edge agent (presence + call)"
+description = "CanisLink edge agent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -20,6 +20,7 @@ path = "src/main.rs"
 protocol = { workspace = true }
 presence = { workspace = true }
 canis-sense = { path = "../canis-sense" }
+mcu-emu = { path = "../../firmware/mcu-emu" }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

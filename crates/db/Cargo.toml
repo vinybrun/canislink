@@ -1,6 +1,6 @@
 [package]
 name = "db"
-description = "Data stores (in-memory presence, bonds, invites)"
+description = "In-memory data stores for CanisLink alpha"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,6 +11,7 @@ rust-version.workspace = true
 [dependencies]
 protocol = { workspace = true }
 bond = { workspace = true }
+policy = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 serde = { workspace = true }

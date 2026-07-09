@@ -1,11 +1,12 @@
-//! Edge agent — presence, call, accept, session end.
+//! Edge agent — full base control plane client.
 
 use canis_sense::{SensePipeline, SenseSnapshot};
 use chrono::Utc;
 use protocol::mcu::{ButtonPayload, FrameDecoder, MsgType};
 use protocol::{
-    AcceptInviteResponse, CreateInviteResponse, DogId, EndReason, IncomingInviteOffer, Intent,
-    InviteMode, PresenceReport, SessionRecord, TerminalId, PRESENCE_PUBLISH_MS,
+    AcceptInviteResponse, ConfigV1, CreateInviteResponse, DogId, EndReason, IncomingInviteOffer,
+    Intent, InviteMode, PresenceReport, SessionRecord, SessionState, TerminalId,
+    PRESENCE_PUBLISH_MS,
 };
 use reqwest::Client;
 use std::time::Duration;
@@ -33,7 +34,9 @@ pub enum EdgeUx {
     Inviting,
     RingingOut,
     RingingIn,
+    Negotiating,
     InSession,
+    Halted,
 }
 
 #[derive(Debug)]
@@ -45,7 +48,9 @@ pub struct EdgeAgent {
     pub ux: EdgeUx,
     pub last_offer: Option<IncomingInviteOffer>,
     pub session: Option<SessionRecord>,
+    pub remote_config: Option<ConfigV1>,
     decoder: FrameDecoder,
+    pub social_armed: bool,
 }
 
 impl EdgeAgent {
@@ -58,7 +63,9 @@ impl EdgeAgent {
             ux: EdgeUx::IdleEmpty,
             last_offer: None,
             session: None,
+            remote_config: None,
             decoder: FrameDecoder::new(),
+            social_armed: true,
         }
     }
 
@@ -71,23 +78,24 @@ impl EdgeAgent {
                 self.ux = EdgeUx::IdleEmpty;
                 self.last_offer = None;
             }
-            (false, EdgeUx::InSession) => {
-                // walk-away end handled by caller via end_session
-            }
             _ => {}
         }
+        self.recompute_armed();
     }
 
-    pub fn ingest_sample(
-        &mut self,
-        force_n: f32,
-        tof_mm: Option<u16>,
-        motion: bool,
-        dt_ms: u64,
-    ) -> SenseSnapshot {
-        let snap = self.sense.push_sample(force_n, tof_mm, motion, dt_ms);
-        self.refresh_ux_from_presence();
-        snap
+    fn recompute_armed(&mut self) {
+        let present = self.sense.filter().present();
+        let estop = self
+            .remote_config
+            .as_ref()
+            .map(|c| c.emergency_stop)
+            .unwrap_or(false);
+        let disabled = self
+            .remote_config
+            .as_ref()
+            .map(|c| c.social_disabled)
+            .unwrap_or(false);
+        self.social_armed = present && !estop && !disabled && self.ux != EdgeUx::Halted;
     }
 
     pub fn ingest_uart(&mut self, bytes: &[u8], dt_ms: u64) -> (Vec<SenseSnapshot>, Vec<Intent>) {
@@ -141,9 +149,35 @@ impl EdgeAgent {
         Ok(())
     }
 
+    pub async fn fetch_config(&mut self) -> anyhow::Result<ConfigV1> {
+        let url = format!(
+            "{}/v1/config?dog_id={}&terminal_id={}",
+            self.cfg.api_base.trim_end_matches('/'),
+            self.cfg.dog_id,
+            self.cfg.terminal_id
+        );
+        let res = self
+            .client
+            .get(&url)
+            .header("Authorization", self.cfg.auth_header())
+            .send()
+            .await?
+            .error_for_status()?;
+        let cfg: ConfigV1 = res.json().await?;
+        if cfg.emergency_stop {
+            self.ux = EdgeUx::Halted;
+            if self.session.is_some() {
+                let _ = self.end_session(EndReason::EmergencyStop).await;
+            }
+        }
+        self.remote_config = Some(cfg.clone());
+        self.recompute_armed();
+        Ok(cfg)
+    }
+
     pub async fn call(&mut self, to: Option<DogId>) -> anyhow::Result<CreateInviteResponse> {
-        if !self.sense.filter().present() {
-            anyhow::bail!("not present — Call ignored");
+        if !self.social_armed {
+            anyhow::bail!("social not armed");
         }
         self.ux = EdgeUx::Inviting;
         let url = format!("{}/v1/invites", self.cfg.api_base.trim_end_matches('/'));
@@ -162,17 +196,22 @@ impl EdgeAgent {
             .await?;
         if !res.status().is_success() {
             self.ux = EdgeUx::IdlePresent;
-            let status = res.status();
-            let text = res.text().await.unwrap_or_default();
-            anyhow::bail!("invite failed: {status} {text}");
+            anyhow::bail!(
+                "invite failed: {} {}",
+                res.status(),
+                res.text().await.unwrap_or_default()
+            );
         }
         let resp: CreateInviteResponse = res.json().await?;
         self.ux = EdgeUx::RingingOut;
-        info!(invite = %resp.invite.id, to = %resp.invite.to_dog, "ringing out");
+        info!(invite = %resp.invite.id, "ringing out");
         Ok(resp)
     }
 
     pub async fn poll_incoming(&mut self) -> anyhow::Result<Option<IncomingInviteOffer>> {
+        if !self.social_armed && self.ux != EdgeUx::RingingIn {
+            return Ok(None);
+        }
         let url = format!(
             "{}/v1/invites/incoming?dog_id={}&terminal_id={}",
             self.cfg.api_base.trim_end_matches('/'),
@@ -186,34 +225,27 @@ impl EdgeAgent {
             .send()
             .await?;
         if !res.status().is_success() {
-            warn!(status = %res.status(), "incoming poll failed");
             return Ok(None);
         }
         let offer: Option<IncomingInviteOffer> = res.json().await?;
         if let Some(ref o) = offer {
-            if !matches!(self.ux, EdgeUx::RingingOut | EdgeUx::InSession) {
+            if !matches!(
+                self.ux,
+                EdgeUx::RingingOut | EdgeUx::InSession | EdgeUx::Negotiating
+            ) {
                 self.ux = EdgeUx::RingingIn;
                 self.last_offer = Some(o.clone());
-                info!(
-                    invite = %o.invite.id,
-                    from = %o.invite.from_dog,
-                    pattern = %o.lure.led_pattern,
-                    "lure active (dog-native, no human push)"
-                );
+                info!(invite = %o.invite.id, "lure active");
             }
         }
         Ok(offer)
     }
 
-    /// Engage accept: any pad press while RingingIn (architecture: present + pad engage).
     pub async fn accept_incoming(&mut self) -> anyhow::Result<AcceptInviteResponse> {
         let offer = self
             .last_offer
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("no incoming offer"))?;
-        if !self.sense.filter().present() {
-            anyhow::bail!("not present — cannot accept");
-        }
+            .ok_or_else(|| anyhow::anyhow!("no offer"))?;
         let url = format!(
             "{}/v1/invites/{}/accept",
             self.cfg.api_base.trim_end_matches('/'),
@@ -231,22 +263,80 @@ impl EdgeAgent {
             .send()
             .await?;
         if !res.status().is_success() {
-            anyhow::bail!(
-                "accept failed: {} {}",
-                res.status(),
-                res.text().await.unwrap_or_default()
-            );
+            anyhow::bail!("accept failed: {}", res.status());
         }
         let resp: AcceptInviteResponse = res.json().await?;
         self.session = Some(resp.session.clone());
         self.last_offer = None;
-        self.ux = EdgeUx::InSession;
-        info!(
-            session = %resp.session.id,
-            role = %resp.webrtc_role,
-            "in session (AV stub — portal media later)"
-        );
+        self.ux = EdgeUx::Negotiating;
+        // media stub: immediately declare ready
+        self.report_media_ready(true).await?;
         Ok(resp)
+    }
+
+    pub async fn report_media_ready(&mut self, ready: bool) -> anyhow::Result<()> {
+        let sess = self
+            .session
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("no session"))?;
+        let url = format!(
+            "{}/v1/sessions/{}/media_ready",
+            self.cfg.api_base.trim_end_matches('/'),
+            sess.id
+        );
+        let body = serde_json::json!({
+            "dog_id": self.cfg.dog_id,
+            "terminal_id": self.cfg.terminal_id,
+            "ready": ready,
+        });
+        let res = self
+            .client
+            .post(&url)
+            .header("Authorization", self.cfg.auth_header())
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: serde_json::Value = res.json().await?;
+        if let Some(session) = body.get("session") {
+            let s: SessionRecord = serde_json::from_value(session.clone())?;
+            self.session = Some(s.clone());
+            if s.state == SessionState::Active || body["both_ready"].as_bool() == Some(true) {
+                self.ux = EdgeUx::InSession;
+                info!(session = %s.id, "portal Active (media stub path)");
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn again(&mut self) -> anyhow::Result<()> {
+        let sess = self
+            .session
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("no session"))?;
+        let url = format!(
+            "{}/v1/sessions/{}/again",
+            self.cfg.api_base.trim_end_matches('/'),
+            sess.id
+        );
+        let body = serde_json::json!({
+            "dog_id": self.cfg.dog_id,
+            "terminal_id": self.cfg.terminal_id,
+        });
+        let res = self
+            .client
+            .post(&url)
+            .header("Authorization", self.cfg.auth_header())
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: serde_json::Value = res.json().await?;
+        if let Some(session) = body.get("session") {
+            self.session = Some(serde_json::from_value(session.clone())?);
+            info!("segment extended (Again)");
+        }
+        Ok(())
     }
 
     pub async fn end_session(&mut self, reason: EndReason) -> anyhow::Result<()> {
@@ -263,47 +353,71 @@ impl EdgeAgent {
             "terminal_id": self.cfg.terminal_id,
             "reason": reason,
         });
-        let res = self
+        let _ = self
             .client
             .post(&url)
             .header("Authorization", self.cfg.auth_header())
             .json(&body)
             .send()
-            .await?;
-        if !res.status().is_success() && res.status() != reqwest::StatusCode::NOT_FOUND {
-            warn!(status = %res.status(), "end session failed");
-        }
+            .await;
         self.session = None;
         self.ux = if self.sense.filter().present() {
             EdgeUx::IdlePresent
         } else {
             EdgeUx::IdleEmpty
         };
-        info!(?reason, "session ended locally");
+        info!(?reason, "session ended");
+        Ok(())
+    }
+
+    pub async fn sync_active(&mut self) -> anyhow::Result<()> {
+        let url = format!(
+            "{}/v1/sessions/active?dog_id={}&terminal_id={}",
+            self.cfg.api_base.trim_end_matches('/'),
+            self.cfg.dog_id,
+            self.cfg.terminal_id
+        );
+        let res = self
+            .client
+            .get(&url)
+            .header("Authorization", self.cfg.auth_header())
+            .send()
+            .await?
+            .error_for_status()?;
+        let sess: Option<SessionRecord> = res.json().await?;
+        if let Some(s) = sess {
+            self.session = Some(s.clone());
+            self.ux = if s.state == SessionState::Active {
+                EdgeUx::InSession
+            } else {
+                EdgeUx::Negotiating
+            };
+            if self.ux == EdgeUx::Negotiating {
+                let _ = self.report_media_ready(true).await;
+            }
+        }
         Ok(())
     }
 
     pub async fn handle_intent(&mut self, intent: Intent) -> anyhow::Result<()> {
         match intent {
-            Intent::Call if matches!(self.ux, EdgeUx::IdlePresent) => {
+            Intent::Call | Intent::Play
+                if matches!(self.ux, EdgeUx::IdlePresent) && self.social_armed =>
+            {
                 self.call(None).await?;
             }
             Intent::Call | Intent::Play | Intent::Again | Intent::Done
                 if self.ux == EdgeUx::RingingIn =>
             {
-                // any engage pad accepts
                 self.accept_incoming().await?;
             }
-            Intent::Done if self.ux == EdgeUx::InSession => {
+            Intent::Again if self.ux == EdgeUx::InSession => {
+                self.again().await?;
+            }
+            Intent::Done if matches!(self.ux, EdgeUx::InSession | EdgeUx::Negotiating) => {
                 self.end_session(EndReason::Done).await?;
             }
-            Intent::Play if matches!(self.ux, EdgeUx::IdlePresent) => {
-                // Play maps to invite portal for now
-                self.call(None).await?;
-            }
-            _ => {
-                debug!(?intent, ux = ?self.ux, "intent ignored in state");
-            }
+            _ => debug!(?intent, ux = ?self.ux, "ignored"),
         }
         Ok(())
     }
@@ -321,4 +435,9 @@ fn pad_to_intent(pad: u8) -> Option<Intent> {
         3 => Some(Intent::Done),
         _ => None,
     }
+}
+
+#[allow(dead_code)]
+fn _w() {
+    warn!("x");
 }

@@ -1,6 +1,6 @@
 [package]
 name = "steward-api"
-description = "CanisLink cloud service: steward-api"
+description = "Steward plane helper"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,4 +8,11 @@ repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "steward-api"
+path = "src/main.rs"
+
 [dependencies]
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

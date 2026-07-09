@@ -201,6 +201,7 @@ dependencies = [
  "canis-sense",
  "chrono",
  "clap",
+ "mcu-emu",
  "presence",
  "protocol",
  "reqwest",
@@ -219,6 +220,11 @@ version = "0.1.0"
 [[package]]
 name = "canis-media"
 version = "0.1.0"
+dependencies = [
+ "clap",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "canis-sense"
@@ -390,6 +396,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "parking_lot",
+ "policy",
  "protocol",
  "serde",
 ]
@@ -406,6 +413,7 @@ dependencies = [
  "db",
  "device-auth",
  "parking_lot",
+ "policy",
  "protocol",
  "serde",
  "serde_json",
@@ -463,6 +471,7 @@ dependencies = [
  "db",
  "device-auth",
  "mcu-emu",
+ "policy",
  "presence",
  "protocol",
  "reqwest",
@@ -1016,10 +1025,21 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "policy"
 version = "0.1.0"
+dependencies = [
+ "chrono",
+ "protocol",
+ "serde",
+ "thiserror",
+]
 
 [[package]]
 name = "policy-worker"
 version = "0.1.0"
+dependencies = [
+ "clap",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "potential_utf"
@@ -1412,6 +1432,15 @@ dependencies = [
 [[package]]
 name = "signaling"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "sim-dog"
@@ -1463,6 +1492,11 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 [[package]]
 name = "steward-api"
 version = "0.1.0"
+dependencies = [
+ "clap",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "strsim"

@@ -329,3 +329,106 @@ pub struct EndSessionRequest {
     pub terminal_id: TerminalId,
     pub reason: EndReason,
 }
+
+/// Device configuration snapshot (GET /v1/config).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConfigV1 {
+    pub dog_id: DogId,
+    pub terminal_id: TerminalId,
+    pub social_disabled: bool,
+    pub emergency_stop: bool,
+    pub timezone: String,
+    pub utc_offset_min: i16,
+    pub sleep_start_min: u16,
+    pub sleep_end_min: u16,
+    pub max_session_sec: u64,
+    pub segment_sec: u64,
+    pub lure: LureConfig,
+    pub pad_map: PadMap,
+    pub ice: IceConfig,
+    pub features: FeatureFlags,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PadMap {
+    pub call: u8,
+    pub play: u8,
+    pub again: u8,
+    pub done: u8,
+}
+
+impl Default for PadMap {
+    fn default() -> Self {
+        Self {
+            call: 0,
+            play: 1,
+            again: 2,
+            done: 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IceConfig {
+    pub stun_urls: Vec<String>,
+    pub turn_uris: Vec<String>,
+    pub turn_username: String,
+    pub turn_credential: String,
+    pub ttl_sec: u64,
+}
+
+impl Default for IceConfig {
+    fn default() -> Self {
+        Self {
+            stun_urls: vec!["stun:stun.l.google.com:19302".into()],
+            turn_uris: vec![],
+            turn_username: String::new(),
+            turn_credential: String::new(),
+            ttl_sec: 3600,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeatureFlags {
+    pub portal_v1: bool,
+    pub play_mode: bool,
+    pub toy_sync: bool,
+    pub force_turn: bool,
+}
+
+impl Default for FeatureFlags {
+    fn default() -> Self {
+        Self {
+            portal_v1: true,
+            play_mode: true,
+            toy_sync: false,
+            force_turn: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MediaReadyRequest {
+    pub dog_id: DogId,
+    pub terminal_id: TerminalId,
+    pub session_id: SessionId,
+    pub ready: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MediaReadyResponse {
+    pub both_ready: bool,
+    pub session: SessionRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgainRequest {
+    pub dog_id: DogId,
+    pub terminal_id: TerminalId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgainResponse {
+    pub session: SessionRecord,
+}

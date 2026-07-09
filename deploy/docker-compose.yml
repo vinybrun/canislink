@@ -1,14 +1,20 @@
-# Dev stack scaffold — filled in PR-09 (Postgres, Redis, coturn, device-api, …)
+# CanisLink alpha ship stack (control plane)
 services:
-  postgres:
-    image: postgres:16-alpine
+  device-api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["device-api", "--bind", "0.0.0.0:8080"]
     environment:
-      POSTGRES_USER: canis
-      POSTGRES_PASSWORD: canis
-      POSTGRES_DB: canislink
+      CANIS_DEVICE_SECRET: canis-dev-secret
+      CANIS_STEWARD_SECRET: canis-steward-secret
+      RUST_LOG: device_api=info
     ports:
-      - "5432:5432"
-  redis:
-    image: redis:7-alpine
+      - "8080:8080"
+  signaling:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["signaling", "--bind", "0.0.0.0:8081"]
     ports:
-      - "6379:6379"
+      - "8081:8081"

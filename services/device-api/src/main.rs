@@ -1,7 +1,7 @@
-//! Device API — presence + call invites.
+//! Device API — presence, invites, sessions, config, media handshake.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     routing::{get, post},
     Json, Router,
@@ -10,9 +10,11 @@ use chrono::Utc;
 use clap::Parser;
 use db::AppData;
 use device_auth::SharedSecretAuthority;
+use policy::{invite_rate_ok, social_allowed, PolicyDeny};
 use protocol::{
-    AcceptInviteResponse, CreateInviteRequest, CreateInviteResponse, DogId, EndSessionRequest,
-    IncomingInviteOffer, InviteId, LureConfig, PresenceReport, PresenceView, SessionId, TerminalId,
+    AcceptInviteResponse, AgainResponse, ConfigV1, CreateInviteResponse, DogId, EndSessionRequest,
+    FeatureFlags, IceConfig, IncomingInviteOffer, InviteId, LureConfig, MediaReadyResponse, PadMap,
+    PresenceReport, PresenceView, SessionId, SessionState, TerminalId,
 };
 use serde::{Deserialize, Serialize};
 use session::{accept_invite, new_invite, route_invite, webrtc_role, InviteError};
@@ -28,12 +30,19 @@ struct Args {
     bind: String,
     #[arg(long, env = "CANIS_DEVICE_SECRET", default_value = "canis-dev-secret")]
     device_secret: String,
+    #[arg(
+        long,
+        env = "CANIS_STEWARD_SECRET",
+        default_value = "canis-steward-secret"
+    )]
+    steward_secret: String,
 }
 
 #[derive(Clone)]
 struct AppState {
     data: Arc<AppData>,
     auth: SharedSecretAuthority,
+    steward_secret: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,13 +58,20 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "device_api=info,tower_http=info".into()),
         )
         .init();
-
     let args = Args::parse();
     let state = AppState {
         data: Arc::new(AppData::new()),
         auth: SharedSecretAuthority::new(args.device_secret),
+        steward_secret: args.steward_secret,
     };
-
+    // background policy tick (max duration / segment / invite expiry)
+    let tick_data = state.data.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            policy_tick(&tick_data);
+        }
+    });
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(&args.bind).await?;
     info!(%args.bind, "device-api listening");
@@ -63,16 +79,43 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn policy_tick(data: &AppData) {
+    let now = Utc::now();
+    data.invites.expire_due(now);
+    for sess in data.sessions.all() {
+        let pol_a = data.policies.get(sess.dog_a);
+        let max_sec = pol_a.max_session_sec;
+        if (now - sess.started_at).num_seconds() as u64 >= max_sec {
+            data.sessions.end(sess.id);
+            info!(session = %sess.id, "ended max duration");
+            continue;
+        }
+        if now >= sess.segment_deadline_at && sess.state == SessionState::Active {
+            data.sessions.end(sess.id);
+            info!(session = %sess.id, "ended segment expired");
+            continue;
+        }
+        // e-stop either dog
+        if data.policies.get(sess.dog_a).emergency_stop
+            || data.policies.get(sess.dog_b).emergency_stop
+        {
+            data.sessions.end(sess.id);
+            info!(session = %sess.id, "ended emergency_stop");
+        }
+    }
+}
+
 fn router(state: AppState) -> Router {
     Router::new()
         .route(
             "/healthz",
-            get(|| async { Json(serde_json::json!({"ok": true})) }),
+            get(|| async { Json(serde_json::json!({"ok": true, "service": "device-api"})) }),
         )
         .route("/v1/presence", post(post_presence).get(list_presence))
         .route("/v1/presence/{dog_id}", get(get_presence))
         .route("/v1/dev/enroll", post(dev_enroll))
         .route("/v1/dev/bonds", post(dev_bootstrap_bond))
+        .route("/v1/config", get(get_config))
         .route("/v1/invites", post(create_invite))
         .route("/v1/invites/incoming", get(incoming_invite))
         .route("/v1/invites/{invite_id}/cancel", post(cancel_invite))
@@ -82,46 +125,96 @@ fn router(state: AppState) -> Router {
         )
         .route("/v1/sessions/active", get(active_session))
         .route("/v1/sessions/{session_id}/end", post(end_session))
+        .route("/v1/sessions/{session_id}/media_ready", post(media_ready))
+        .route("/v1/sessions/{session_id}/again", post(again))
+        // steward routes hosted on same process for alpha single-binary ship
+        .route("/v1/steward/estop", post(steward_estop))
+        .route("/v1/steward/social_disabled", post(steward_social))
+        .route("/v1/steward/bonds", post(steward_bonds))
+        .route("/v1/steward/policy", post(steward_policy))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
-#[derive(Debug, Deserialize)]
+fn extract_device_token(headers: &HeaderMap) -> Result<(TerminalId, String), StatusCode> {
+    let raw = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let rest = raw
+        .strip_prefix("Device ")
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let (tid, token) = rest.split_once(':').ok_or(StatusCode::UNAUTHORIZED)?;
+    Ok((
+        TerminalId(Uuid::parse_str(tid).map_err(|_| StatusCode::UNAUTHORIZED)?),
+        token.into(),
+    ))
+}
+
+fn verify_device(
+    state: &AppState,
+    headers: &HeaderMap,
+    terminal_id: TerminalId,
+    dog_id: DogId,
+) -> Result<(), StatusCode> {
+    let (tid, token) = extract_device_token(headers)?;
+    if tid != terminal_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    state
+        .auth
+        .verify_pair(terminal_id, dog_id, &token)
+        .map_err(|_| StatusCode::UNAUTHORIZED)
+}
+
+fn verify_steward(state: &AppState, headers: &HeaderMap) -> Result<(), StatusCode> {
+    let raw = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let secret = raw
+        .strip_prefix("Steward ")
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if secret == state.steward_secret {
+        Ok(())
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorBody>) {
+    (status, Json(ErrorBody { error: msg.into() }))
+}
+
+#[derive(Deserialize)]
 struct EnrollRequest {
     terminal_id: Option<Uuid>,
     dog_id: Option<Uuid>,
 }
 
-#[derive(Debug, Serialize)]
-struct EnrollResponse {
-    terminal_id: TerminalId,
-    dog_id: DogId,
-    token: String,
-}
-
 async fn dev_enroll(
     State(state): State<AppState>,
     Json(body): Json<EnrollRequest>,
-) -> Json<EnrollResponse> {
+) -> Json<serde_json::Value> {
     let terminal_id = TerminalId(body.terminal_id.unwrap_or_else(Uuid::new_v4));
     let dog_id = DogId(body.dog_id.unwrap_or_else(Uuid::new_v4));
     let id = state.auth.issue(terminal_id, dog_id);
-    Json(EnrollResponse {
-        terminal_id: id.terminal_id,
-        dog_id: id.dog_id,
-        token: id.token,
-    })
+    state.data.policies.bind_terminal(terminal_id, dog_id);
+    Json(serde_json::json!({
+        "terminal_id": id.terminal_id,
+        "dog_id": id.dog_id,
+        "token": id.token
+    }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct BondBootstrap {
     dog_a: Uuid,
     dog_b: Uuid,
-    #[serde(default = "default_weight")]
+    #[serde(default = "def_w")]
     weight: f32,
 }
-
-fn default_weight() -> f32 {
+fn def_w() -> f32 {
     0.5
 }
 
@@ -137,54 +230,18 @@ async fn dev_bootstrap_bond(
     StatusCode::NO_CONTENT
 }
 
-fn extract_device_token(headers: &HeaderMap) -> Result<(TerminalId, String), StatusCode> {
-    let raw = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    let rest = raw
-        .strip_prefix("Device ")
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    let (tid, token) = rest.split_once(':').ok_or(StatusCode::UNAUTHORIZED)?;
-    let terminal_id = TerminalId(Uuid::parse_str(tid).map_err(|_| StatusCode::UNAUTHORIZED)?);
-    Ok((terminal_id, token.to_string()))
-}
-
 async fn post_presence(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(report): Json<PresenceReport>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    let (terminal_id, token) = extract_device_token(&headers).map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorBody {
-                error: "unauthorized".into(),
-            }),
-        )
-    })?;
-    if terminal_id != report.terminal_id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorBody {
-                error: "terminal_id mismatch".into(),
-            }),
-        ));
-    }
+    verify_device(&state, &headers, report.terminal_id, report.dog_id)
+        .map_err(|s| err(s, "unauthorized"))?;
     state
-        .auth
-        .verify_pair(report.terminal_id, report.dog_id, &token)
-        .map_err(|_| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorBody {
-                    error: "invalid device token".into(),
-                }),
-            )
-        })?;
+        .data
+        .policies
+        .bind_terminal(report.terminal_id, report.dog_id);
     state.data.presence.upsert(report);
-    // expire invites opportunistically
-    state.data.invites.expire_due(Utc::now());
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -204,12 +261,43 @@ async fn list_presence(State(state): State<AppState>) -> Json<Vec<PresenceView>>
     Json(state.data.presence.list_present(Utc::now()))
 }
 
-/// Caller identity is derived from device token + presence report dog binding.
-/// Client sends Authorization and body `{ mode, to_dog?, dog_id, terminal_id }`.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
+struct DeviceQuery {
+    dog_id: Uuid,
+    terminal_id: Uuid,
+}
+
+async fn get_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<DeviceQuery>,
+) -> Result<Json<ConfigV1>, (StatusCode, Json<ErrorBody>)> {
+    let dog_id = DogId(q.dog_id);
+    let terminal_id = TerminalId(q.terminal_id);
+    verify_device(&state, &headers, terminal_id, dog_id).map_err(|s| err(s, "unauthorized"))?;
+    let p = state.data.policies.get(dog_id);
+    Ok(Json(ConfigV1 {
+        dog_id,
+        terminal_id,
+        social_disabled: p.social_disabled,
+        emergency_stop: p.emergency_stop,
+        timezone: p.timezone,
+        utc_offset_min: p.utc_offset_min,
+        sleep_start_min: p.sleep_start_min,
+        sleep_end_min: p.sleep_end_min,
+        max_session_sec: p.max_session_sec,
+        segment_sec: p.segment_sec,
+        lure: LureConfig::default(),
+        pad_map: PadMap::default(),
+        ice: IceConfig::default(),
+        features: FeatureFlags::default(),
+    }))
+}
+
+#[derive(Deserialize)]
 struct CreateInviteBody {
-    #[serde(flatten)]
-    req: CreateInviteRequest,
+    mode: protocol::InviteMode,
+    to_dog: Option<DogId>,
     dog_id: DogId,
     terminal_id: TerminalId,
 }
@@ -219,52 +307,31 @@ async fn create_invite(
     headers: HeaderMap,
     Json(body): Json<CreateInviteBody>,
 ) -> Result<Json<CreateInviteResponse>, (StatusCode, Json<ErrorBody>)> {
-    let (terminal_id, token) = extract_device_token(&headers).map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorBody {
-                error: "unauthorized".into(),
-            }),
-        )
-    })?;
-    if terminal_id != body.terminal_id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorBody {
-                error: "terminal mismatch".into(),
-            }),
-        ));
-    }
-    state
-        .auth
-        .verify_pair(body.terminal_id, body.dog_id, &token)
-        .map_err(|_| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorBody {
-                    error: "invalid token".into(),
-                }),
-            )
-        })?;
-
+    verify_device(&state, &headers, body.terminal_id, body.dog_id)
+        .map_err(|s| err(s, "unauthorized"))?;
     let now = Utc::now();
     state.data.invites.expire_due(now);
-
-    if state.data.invites.for_dog(body.dog_id).is_some() {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ErrorBody {
-                error: "caller busy".into(),
-            }),
-        ));
+    let pol = state.data.policies.get(body.dog_id);
+    social_allowed(&pol, now).map_err(|e| match e {
+        PolicyDeny::EmergencyStop => err(StatusCode::LOCKED, e.to_string()),
+        PolicyDeny::SocialDisabled => err(StatusCode::FORBIDDEN, e.to_string()),
+        PolicyDeny::Sleep => err(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS, e.to_string()),
+        PolicyDeny::RateLimit => err(StatusCode::TOO_MANY_REQUESTS, e.to_string()),
+    })?;
+    let count = state.data.invites.invites_last_hour(body.dog_id, now);
+    invite_rate_ok(count, pol.max_invites_per_hour)
+        .map_err(|e| err(StatusCode::TOO_MANY_REQUESTS, e.to_string()))?;
+    if state.data.invites.for_dog(body.dog_id).is_some()
+        || state.data.sessions.for_dog(body.dog_id).is_some()
+    {
+        return Err(err(StatusCode::CONFLICT, "caller busy"));
     }
-
     let present_ids = state.data.presence.present_dog_ids(now);
     let caller_present = state.data.presence.is_present(body.dog_id, now);
     let bonds = state.data.bonds.lock();
     let to = route_invite(
         body.dog_id,
-        body.req.to_dog,
+        body.to_dog,
         &bonds,
         &present_ids,
         caller_present,
@@ -276,92 +343,45 @@ async fn create_invite(
             InviteError::NotBonded => StatusCode::FORBIDDEN,
             InviteError::CallerBusy | InviteError::PeerBusy => StatusCode::CONFLICT,
         };
-        (
-            code,
-            Json(ErrorBody {
-                error: e.to_string(),
-            }),
-        )
+        err(code, e.to_string())
     })?;
     drop(bonds);
-
-    if state.data.invites.for_dog(to).is_some() {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ErrorBody {
-                error: "peer busy".into(),
-            }),
-        ));
+    // peer policy
+    let peer_pol = state.data.policies.get(to);
+    social_allowed(&peer_pol, now).map_err(|e| err(StatusCode::FORBIDDEN, format!("peer: {e}")))?;
+    if state.data.invites.for_dog(to).is_some() || state.data.sessions.for_dog(to).is_some() {
+        return Err(err(StatusCode::CONFLICT, "peer busy"));
     }
-
-    let mode = body.req.mode;
-    let invite = new_invite(body.dog_id, to, mode);
-    state.data.invites.insert(invite.clone()).map_err(|_| {
-        (
-            StatusCode::CONFLICT,
-            Json(ErrorBody {
-                error: "busy".into(),
-            }),
-        )
-    })?;
-
-    info!(
-        from = %invite.from_dog,
-        to = %invite.to_dog,
-        id = %invite.id,
-        "invite ringing"
-    );
+    let invite = new_invite(body.dog_id, to, body.mode);
+    state
+        .data
+        .invites
+        .insert(invite.clone())
+        .map_err(|_| err(StatusCode::CONFLICT, "busy"))?;
+    state.data.invites.record_invite(body.dog_id, now);
+    info!(from = %invite.from_dog, to = %invite.to_dog, id = %invite.id, "invite ringing");
     Ok(Json(CreateInviteResponse { invite }))
-}
-
-#[derive(Debug, Deserialize)]
-struct IncomingQuery {
-    dog_id: Uuid,
-    terminal_id: Uuid,
 }
 
 async fn incoming_invite(
     State(state): State<AppState>,
     headers: HeaderMap,
-    axum::extract::Query(q): axum::extract::Query<IncomingQuery>,
+    Query(q): Query<DeviceQuery>,
 ) -> Result<Json<Option<IncomingInviteOffer>>, (StatusCode, Json<ErrorBody>)> {
-    let (terminal_id, token) = extract_device_token(&headers).map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorBody {
-                error: "unauthorized".into(),
-            }),
-        )
-    })?;
     let dog_id = DogId(q.dog_id);
-    let tid = TerminalId(q.terminal_id);
-    if tid != terminal_id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorBody {
-                error: "terminal mismatch".into(),
-            }),
-        ));
+    let terminal_id = TerminalId(q.terminal_id);
+    verify_device(&state, &headers, terminal_id, dog_id).map_err(|s| err(s, "unauthorized"))?;
+    let pol = state.data.policies.get(dog_id);
+    if pol.emergency_stop || pol.social_disabled {
+        return Ok(Json(None));
     }
-    state.auth.verify_pair(tid, dog_id, &token).map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorBody {
-                error: "invalid token".into(),
-            }),
-        )
-    })?;
-
     state.data.invites.expire_due(Utc::now());
-    let offer = state
-        .data
-        .invites
-        .incoming_for(dog_id)
-        .map(|invite| IncomingInviteOffer {
+    Ok(Json(state.data.invites.incoming_for(dog_id).map(
+        |invite| IncomingInviteOffer {
             invite,
             lure: LureConfig::default(),
-        });
-    Ok(Json(offer))
+        },
+    )))
 }
 
 async fn cancel_invite(
@@ -370,55 +390,24 @@ async fn cancel_invite(
     Path(invite_id): Path<Uuid>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    let (terminal_id, token) = extract_device_token(&headers).map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorBody {
-                error: "unauthorized".into(),
-            }),
-        )
-    })?;
-    let dog_id = body
-        .get("dog_id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .map(DogId)
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: "dog_id required".into(),
-            }),
-        ))?;
+    let dog_id = DogId(
+        Uuid::parse_str(body["dog_id"].as_str().unwrap_or_default())
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "dog_id"))?,
+    );
+    let (tid, token) = extract_device_token(&headers).map_err(|s| err(s, "unauthorized"))?;
     state
         .auth
-        .verify_pair(terminal_id, dog_id, &token)
-        .map_err(|_| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorBody {
-                    error: "invalid token".into(),
-                }),
-            )
-        })?;
-    let id = protocol::InviteId(invite_id);
+        .verify_pair(tid, dog_id, &token)
+        .map_err(|_| err(StatusCode::UNAUTHORIZED, "invalid token"))?;
+    let id = InviteId(invite_id);
     if let Some(inv) = state.data.invites.get(id) {
         if inv.from_dog != dog_id && inv.to_dog != dog_id {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ErrorBody {
-                    error: "not party to invite".into(),
-                }),
-            ));
+            return Err(err(StatusCode::FORBIDDEN, "not party"));
         }
         state.data.invites.close(id);
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorBody {
-                error: "not found".into(),
-            }),
-        ))
+        Err(err(StatusCode::NOT_FOUND, "not found"))
     }
 }
 
@@ -428,123 +417,57 @@ async fn accept_invite_handler(
     Path(invite_id): Path<Uuid>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<AcceptInviteResponse>, (StatusCode, Json<ErrorBody>)> {
-    let (terminal_id, token) = extract_device_token(&headers).map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorBody {
-                error: "unauthorized".into(),
-            }),
-        )
-    })?;
-    let dog_id = body
-        .get("dog_id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .map(DogId)
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: "dog_id required".into(),
-            }),
-        ))?;
-    let tid = body
-        .get("terminal_id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .map(TerminalId)
-        .unwrap_or(terminal_id);
-    if tid != terminal_id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorBody {
-                error: "terminal mismatch".into(),
-            }),
-        ));
-    }
-    state
-        .auth
-        .verify_pair(terminal_id, dog_id, &token)
-        .map_err(|_| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorBody {
-                    error: "invalid token".into(),
-                }),
-            )
-        })?;
-
+    let dog_id = DogId(
+        Uuid::parse_str(body["dog_id"].as_str().unwrap_or_default())
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "dog_id"))?,
+    );
+    let terminal_id = TerminalId(
+        Uuid::parse_str(body["terminal_id"].as_str().unwrap_or_default())
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "terminal_id"))?,
+    );
+    verify_device(&state, &headers, terminal_id, dog_id).map_err(|s| err(s, "unauthorized"))?;
     let now = Utc::now();
+    let pol = state.data.policies.get(dog_id);
+    social_allowed(&pol, now).map_err(|e| err(StatusCode::FORBIDDEN, e.to_string()))?;
     state.data.invites.expire_due(now);
     let id = InviteId(invite_id);
-    let invite = state.data.invites.get(id).ok_or((
-        StatusCode::NOT_FOUND,
-        Json(ErrorBody {
-            error: "invite not found".into(),
-        }),
-    ))?;
+    let invite = state
+        .data
+        .invites
+        .get(id)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "invite not found"))?;
     let present = state.data.presence.is_present(dog_id, now);
-    let session = accept_invite(&invite, dog_id, present, now).map_err(|e| {
-        (
-            StatusCode::PRECONDITION_FAILED,
-            Json(ErrorBody {
-                error: e.to_string(),
-            }),
-        )
-    })?;
+    let mut session = accept_invite(&invite, dog_id, present, now)
+        .map_err(|e| err(StatusCode::PRECONDITION_FAILED, e.to_string()))?;
+    // start as Negotiating until both media_ready (alpha may mark ready immediately via edge)
+    session.state = SessionState::Negotiating;
+    // apply policy max/segment
+    let max_sec = pol.max_session_sec as i64;
+    let seg_sec = pol.segment_sec as i64;
+    session.max_end_at = now + chrono::Duration::seconds(max_sec);
+    session.segment_deadline_at = now + chrono::Duration::seconds(seg_sec);
     state.data.invites.close(id);
-    state.data.sessions.insert(session.clone()).map_err(|_| {
-        (
-            StatusCode::CONFLICT,
-            Json(ErrorBody {
-                error: "session busy".into(),
-            }),
-        )
-    })?;
+    state
+        .data
+        .sessions
+        .insert(session.clone())
+        .map_err(|_| err(StatusCode::CONFLICT, "session busy"))?;
     let role = webrtc_role(&session, dog_id).to_string();
-    info!(session = %session.id, dog = %dog_id, %role, "session active (media stub)");
+    info!(session = %session.id, dog = %dog_id, %role, "session negotiating");
     Ok(Json(AcceptInviteResponse {
         session,
         webrtc_role: role,
     }))
 }
 
-#[derive(Debug, Deserialize)]
-struct ActiveQuery {
-    dog_id: Uuid,
-    terminal_id: Uuid,
-}
-
 async fn active_session(
     State(state): State<AppState>,
     headers: HeaderMap,
-    axum::extract::Query(q): axum::extract::Query<ActiveQuery>,
+    Query(q): Query<DeviceQuery>,
 ) -> Result<Json<Option<protocol::SessionRecord>>, (StatusCode, Json<ErrorBody>)> {
-    let (terminal_id, token) = extract_device_token(&headers).map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorBody {
-                error: "unauthorized".into(),
-            }),
-        )
-    })?;
     let dog_id = DogId(q.dog_id);
-    let tid = TerminalId(q.terminal_id);
-    if tid != terminal_id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorBody {
-                error: "terminal mismatch".into(),
-            }),
-        ));
-    }
-    state.auth.verify_pair(tid, dog_id, &token).map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorBody {
-                error: "invalid token".into(),
-            }),
-        )
-    })?;
+    let terminal_id = TerminalId(q.terminal_id);
+    verify_device(&state, &headers, terminal_id, dog_id).map_err(|s| err(s, "unauthorized"))?;
     Ok(Json(state.data.sessions.for_dog(dog_id)))
 }
 
@@ -554,52 +477,180 @@ async fn end_session(
     Path(session_id): Path<Uuid>,
     Json(body): Json<EndSessionRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    let (terminal_id, token) = extract_device_token(&headers).map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorBody {
-                error: "unauthorized".into(),
-            }),
-        )
-    })?;
-    if terminal_id != body.terminal_id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorBody {
-                error: "terminal mismatch".into(),
-            }),
-        ));
-    }
-    state
-        .auth
-        .verify_pair(body.terminal_id, body.dog_id, &token)
-        .map_err(|_| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorBody {
-                    error: "invalid token".into(),
-                }),
-            )
-        })?;
+    verify_device(&state, &headers, body.terminal_id, body.dog_id)
+        .map_err(|s| err(s, "unauthorized"))?;
     let id = SessionId(session_id);
     let Some(sess) = state.data.sessions.get(id) else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorBody {
-                error: "not found".into(),
-            }),
-        ));
+        return Err(err(StatusCode::NOT_FOUND, "not found"));
     };
     if sess.dog_a != body.dog_id && sess.dog_b != body.dog_id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorBody {
-                error: "not party".into(),
-            }),
-        ));
+        return Err(err(StatusCode::FORBIDDEN, "not party"));
     }
     state.data.sessions.end(id);
     info!(session = %id, reason = ?body.reason, "session ended");
-    let _ = body.reason;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn media_ready(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<Uuid>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<MediaReadyResponse>, (StatusCode, Json<ErrorBody>)> {
+    let dog_id = DogId(
+        Uuid::parse_str(body["dog_id"].as_str().unwrap_or_default())
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "dog_id"))?,
+    );
+    let terminal_id = TerminalId(
+        Uuid::parse_str(body["terminal_id"].as_str().unwrap_or_default())
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "terminal_id"))?,
+    );
+    verify_device(&state, &headers, terminal_id, dog_id).map_err(|s| err(s, "unauthorized"))?;
+    let ready = body.get("ready").and_then(|v| v.as_bool()).unwrap_or(true);
+    let id = SessionId(session_id);
+    let (both, session) = state
+        .data
+        .sessions
+        .set_media_ready(id, dog_id, ready)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "session"))?;
+    if both {
+        info!(session = %id, "both media ready → Active");
+    }
+    Ok(Json(MediaReadyResponse {
+        both_ready: both,
+        session,
+    }))
+}
+
+async fn again(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<Uuid>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<AgainResponse>, (StatusCode, Json<ErrorBody>)> {
+    let dog_id = DogId(
+        Uuid::parse_str(body["dog_id"].as_str().unwrap_or_default())
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "dog_id"))?,
+    );
+    let terminal_id = TerminalId(
+        Uuid::parse_str(body["terminal_id"].as_str().unwrap_or_default())
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "terminal_id"))?,
+    );
+    verify_device(&state, &headers, terminal_id, dog_id).map_err(|s| err(s, "unauthorized"))?;
+    let id = SessionId(session_id);
+    let sess = state
+        .data
+        .sessions
+        .get(id)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "session"))?;
+    if sess.dog_a != dog_id && sess.dog_b != dog_id {
+        return Err(err(StatusCode::FORBIDDEN, "not party"));
+    }
+    let pol = state.data.policies.get(dog_id);
+    let now = Utc::now();
+    let new_deadline = policy::extend_segment(now, pol.segment_sec, sess.max_end_at);
+    let session = state
+        .data
+        .sessions
+        .update(id, |s| s.segment_deadline_at = new_deadline)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "session"))?;
+    info!(session = %id, until = %new_deadline, "segment extended");
+    Ok(Json(AgainResponse { session }))
+}
+
+// --- Steward ---
+
+#[derive(Deserialize)]
+struct StewardDogFlag {
+    dog_id: Uuid,
+    enabled: bool,
+}
+
+async fn steward_estop(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<StewardDogFlag>,
+) -> Result<StatusCode, StatusCode> {
+    verify_steward(&state, &headers)?;
+    state
+        .data
+        .policies
+        .set_estop(DogId(body.dog_id), body.enabled);
+    // end sessions immediately
+    if body.enabled {
+        if let Some(s) = state.data.sessions.for_dog(DogId(body.dog_id)) {
+            state.data.sessions.end(s.id);
+        }
+    }
+    info!(dog = %body.dog_id, enabled = body.enabled, "steward emergency_stop");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn steward_social(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<StewardDogFlag>,
+) -> Result<StatusCode, StatusCode> {
+    verify_steward(&state, &headers)?;
+    state
+        .data
+        .policies
+        .set_social_disabled(DogId(body.dog_id), body.enabled);
+    info!(dog = %body.dog_id, enabled = body.enabled, "steward social_disabled");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn steward_bonds(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<BondBootstrap>,
+) -> Result<StatusCode, StatusCode> {
+    verify_steward(&state, &headers)?;
+    state
+        .data
+        .bonds
+        .lock()
+        .bootstrap_mutual(DogId(body.dog_a), DogId(body.dog_b), body.weight);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct StewardPolicyBody {
+    dog_id: Uuid,
+    sleep_start_min: Option<u16>,
+    sleep_end_min: Option<u16>,
+    utc_offset_min: Option<i16>,
+    max_session_sec: Option<u64>,
+    segment_sec: Option<u64>,
+    max_invites_per_hour: Option<u32>,
+}
+
+async fn steward_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<StewardPolicyBody>,
+) -> Result<StatusCode, StatusCode> {
+    verify_steward(&state, &headers)?;
+    let dog = DogId(body.dog_id);
+    let mut p = state.data.policies.get(dog);
+    if let Some(v) = body.sleep_start_min {
+        p.sleep_start_min = v;
+    }
+    if let Some(v) = body.sleep_end_min {
+        p.sleep_end_min = v;
+    }
+    if let Some(v) = body.utc_offset_min {
+        p.utc_offset_min = v;
+    }
+    if let Some(v) = body.max_session_sec {
+        p.max_session_sec = v;
+    }
+    if let Some(v) = body.segment_sec {
+        p.segment_sec = v;
+    }
+    if let Some(v) = body.max_invites_per_hour {
+        p.max_invites_per_hour = v;
+    }
+    state.data.policies.set(p);
     Ok(StatusCode::NO_CONTENT)
 }

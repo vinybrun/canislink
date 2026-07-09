@@ -1,6 +1,6 @@
 [package]
 name = "canis-media"
-description = "CanisLink edge binary: canis-media"
+description = "Media plane (alpha stub)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,4 +8,11 @@ repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "canis-media"
+path = "src/main.rs"
+
 [dependencies]
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

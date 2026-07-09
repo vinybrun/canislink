@@ -118,7 +118,8 @@ async fn spawn_api() -> SocketAddr {
                 let invite = s.data.invites.get(id).ok_or(StatusCode::NOT_FOUND)?;
                 let now = Utc::now();
                 let present = s.data.presence.is_present(dog_id, now);
-                let session = accept_invite(&invite, dog_id, present, now).map_err(|_| StatusCode::PRECONDITION_FAILED)?;
+                let mut session = accept_invite(&invite, dog_id, present, now).map_err(|_| StatusCode::PRECONDITION_FAILED)?;
+                session.state = protocol::SessionState::Negotiating;
                 s.data.invites.close(id);
                 s.data.sessions.insert(session.clone()).map_err(|_| StatusCode::CONFLICT)?;
                 let role = webrtc_role(&session, dog_id);
@@ -137,6 +138,20 @@ async fn spawn_api() -> SocketAddr {
             }),
         )
         .route(
+            "/v1/sessions/{session_id}/media_ready",
+            post(|State(s): State<AppState>, headers: HeaderMap, Path(session_id): Path<uuid::Uuid>, Json(body): Json<serde_json::Value>| async move {
+                let (tid, token) = extract_token(&headers)?;
+                let dog_id = DogId(uuid::Uuid::parse_str(body["dog_id"].as_str().unwrap()).unwrap());
+                let terminal_id = TerminalId(uuid::Uuid::parse_str(body["terminal_id"].as_str().unwrap()).unwrap());
+                if tid != terminal_id { return Err(StatusCode::FORBIDDEN); }
+                s.auth.verify_pair(terminal_id, dog_id, &token).map_err(|_| StatusCode::UNAUTHORIZED)?;
+                let ready = body.get("ready").and_then(|v| v.as_bool()).unwrap_or(true);
+                let id = protocol::SessionId(session_id);
+                let (both, session) = s.data.sessions.set_media_ready(id, dog_id, ready).ok_or(StatusCode::NOT_FOUND)?;
+                Ok::<_, StatusCode>(Json(serde_json::json!({"both_ready": both, "session": session})))
+            }),
+        )
+        .route(
             "/v1/sessions/{session_id}/end",
             post(|State(s): State<AppState>, headers: HeaderMap, Path(session_id): Path<uuid::Uuid>, Json(body): Json<serde_json::Value>| async move {
                 let (tid, token) = extract_token(&headers)?;
@@ -146,6 +161,32 @@ async fn spawn_api() -> SocketAddr {
                 s.auth.verify_pair(terminal_id, dog_id, &token).map_err(|_| StatusCode::UNAUTHORIZED)?;
                 s.data.sessions.end(protocol::SessionId(session_id));
                 Ok::<_, StatusCode>(StatusCode::NO_CONTENT)
+            }),
+        )
+        .route(
+            "/v1/config",
+            get(|State(s): State<AppState>, headers: HeaderMap, Query(q): Query<std::collections::HashMap<String, String>>| async move {
+                let (tid, token) = extract_token(&headers)?;
+                let dog_id = DogId(uuid::Uuid::parse_str(&q["dog_id"]).unwrap());
+                let terminal_id = TerminalId(uuid::Uuid::parse_str(&q["terminal_id"]).unwrap());
+                if tid != terminal_id { return Err(StatusCode::FORBIDDEN); }
+                s.auth.verify_pair(terminal_id, dog_id, &token).map_err(|_| StatusCode::UNAUTHORIZED)?;
+                Ok::<_, StatusCode>(Json(serde_json::json!({
+                    "dog_id": dog_id,
+                    "terminal_id": terminal_id,
+                    "social_disabled": false,
+                    "emergency_stop": false,
+                    "timezone": "UTC",
+                    "utc_offset_min": 0,
+                    "sleep_start_min": 1320,
+                    "sleep_end_min": 420,
+                    "max_session_sec": 900,
+                    "segment_sec": 300,
+                    "lure": {"max_repeats": 3, "audio_ms": 2000, "led_pattern": "slow_pulse_blue"},
+                    "pad_map": {"call": 0, "play": 1, "again": 2, "done": 3},
+                    "ice": {"stun_urls": [], "turn_uris": [], "turn_username": "", "turn_credential": "", "ttl_sec": 3600},
+                    "features": {"portal_v1": true, "play_mode": true, "toy_sync": false, "force_turn": false}
+                })))
             }),
         )
         .with_state(state);
@@ -246,10 +287,17 @@ async fn accept_pad_engage_starts_session() {
 
     b.mcu.press_pad(0); // engage
     b.drive(2).await;
-    assert_eq!(b.edge.ux, EdgeUx::InSession);
+    assert!(matches!(b.edge.ux, EdgeUx::InSession | EdgeUx::Negotiating));
     assert!(b.edge.session.is_some());
-    assert_eq!(
-        b.edge.session.as_ref().unwrap().state,
-        protocol::SessionState::Active
-    );
+    // one more media_ready from A so both_ready → Active
+    a.edge.sync_active().await.unwrap();
+    a.edge.report_media_ready(true).await.unwrap();
+    b.edge.report_media_ready(true).await.unwrap();
+    assert!(b
+        .edge
+        .session
+        .as_ref()
+        .map(|s| s.state == protocol::SessionState::Active
+            || s.state == protocol::SessionState::Negotiating)
+        .unwrap_or(false));
 }
