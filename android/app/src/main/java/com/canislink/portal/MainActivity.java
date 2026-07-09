@@ -127,6 +127,21 @@ public class MainActivity extends AppCompatActivity {
     }
 
     @Override
+    protected void onPause() {
+        // Keep WebRTC / JS alive when a second peer portal comes to foreground
+        // on the same emulator (dual-package lab). Do NOT call web.onPause().
+        super.onPause();
+        Log.i(TAG, "activity_pause keep_webview_alive=1");
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (web != null) web.onResume();
+        Log.i(TAG, "activity_resume");
+    }
+
+    @Override
     protected void onDestroy() {
         if (web != null) web.destroy();
         super.onDestroy();

@@ -11,12 +11,25 @@ android {
         versionCode 1
         versionName "0.2.0-lab"
     }
+    // Dual dog portals on one emulator (or two AVDs): two installable IDs.
+    flavorDimensions "peer"
+    productFlavors {
+        peer1 {
+            dimension "peer"
+            // primary dog terminal
+        }
+        peer2 {
+            dimension "peer"
+            applicationIdSuffix ".peer2"
+            resValue "string", "app_name", "CanisLink Portal B"
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
         }
         debug {
-            // cleartext for lab 10.0.2.2
+            // cleartext for lab reverse / 10.0.2.2
         }
     }
     compileOptions {

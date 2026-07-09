@@ -18,13 +18,28 @@ if adb devices 2>/dev/null | grep -qE "emulator-.*[[:space:]]device"; then
   fi
 fi
 
-echo "starting AVD=$AVD camera=virtualscene/emulated ${EXTRA[*]:-}"
-# virtualscene = synthetic moving scene on back camera (good for dog portal lab)
+export QT_QPA_PLATFORM=${QT_QPA_PLATFORM:-offscreen}
+export LD_LIBRARY_PATH=$ANDROID_HOME/emulator/lib64:$ANDROID_HOME/emulator/lib64/qt/lib:${LD_LIBRARY_PATH:-}
+
+PORT_ARG=()
+# second peer: ./scripts/start_canis_avd.sh CanisLab2 5556
+if [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+  PORT_ARG=(-port "$2")
+  EXTRA=("${@:3}")
+else
+  EXTRA=("${@:2}")
+fi
+
+echo "starting AVD=$AVD camera=virtualscene/emulated ${PORT_ARG[*]:-} ${EXTRA[*]:-}"
+# headless lab: -no-window avoids Qt xcb requirement; virtualscene = synthetic camera
 nohup emulator -avd "$AVD" \
+  "${PORT_ARG[@]}" \
+  -no-window -no-audio -no-boot-anim -no-metrics \
   -camera-back virtualscene \
   -camera-front emulated \
   -no-snapshot-save \
   -gpu swiftshader_indirect \
+  -memory "${EMU_MEMORY:-2048}" \
   "${EXTRA[@]}" \
   >"/tmp/emulator-${AVD}.log" 2>&1 &
 echo "emulator pid $! log /tmp/emulator-${AVD}.log"

@@ -15,9 +15,11 @@
 | TURN / hard NAT | `/v1/config` ICE + coturn REST + portal iceServers | ice_config e2e |
 
 | Emulator camera API path | adb reverse + 127.0.0.1 secure context + virtualscene | MEDIA_PATH=getUserMedia in logcat |
+| Dual Android portal peers | `peer1`+`peer2` app flavors on one AVD (`MODE=same_device`); dual AVD optional | dual-android-e2e-report.json |
 
 ## Still open
 
-- Second Android AVD peer (memory/CPU heavy)
+- Dual AVD simultaneously is flaky on constrained hosts (prefer `MODE=same_device`)
+- Full media path (remote track / pc connected) under dual same-device backgrounding
 - Production TURN fleet / TURNS (TLS) / credential rotation ops
 - Physical multi-phone field trial

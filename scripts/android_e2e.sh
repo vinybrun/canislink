@@ -15,11 +15,15 @@ API_PORT=${API_PORT:-18080}
 SIG_PORT=${SIG_PORT:-18081}
 API="http://127.0.0.1:${API_PORT}"
 REPORT=${REPORT:-docs/lab/android-e2e-report.json}
-APK=$ROOT/android/app/build/outputs/apk/debug/app-debug.apk
+APK=$ROOT/android/app/build/outputs/apk/peer1/debug/app-peer1-debug.apk
+# back-compat if flavor build not present
+if [ ! -f "$APK" ]; then
+  APK=$ROOT/android/app/build/outputs/apk/debug/app-debug.apk
+fi
 
 echo "==> Ensure APK"
 if [ ! -f "$APK" ]; then
-  (cd android && ./gradlew :app:assembleDebug)
+  (cd android && ./gradlew :app:assemblePeer1Debug || ./gradlew :app:assembleDebug)
 fi
 
 echo "==> Ensure emulator"
