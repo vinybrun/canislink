@@ -49,3 +49,11 @@ Ephemeral (no disk) for CI: `CANIS_EPHEMERAL=1` or `--ephemeral`.
 ## License
 
 MIT OR Apache-2.0
+
+## Local experiment (emulators)
+
+```bash
+./scripts/local_experiment.sh
+```
+
+Runs phone emulators (enroll/bond/estop) + embedded MCU/edge terminals + WebRTC media peers. Report: `docs/lab/experiment-report.json`. Details: [`docs/lab/LOCAL_EXPERIMENT.md`](docs/lab/LOCAL_EXPERIMENT.md).

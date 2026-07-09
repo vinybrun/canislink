@@ -1,0 +1,28 @@
+[package]
+name = "lab-experiment"
+description = "Local e2e lab: phone emulators + embedded terminal emulators"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "lab-experiment"
+path = "src/main.rs"
+
+[dependencies]
+protocol = { workspace = true }
+canis-edge = { path = "../../edge/canis-edge" }
+mcu-emu = { path = "../../firmware/mcu-emu" }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

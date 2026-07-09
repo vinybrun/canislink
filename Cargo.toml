@@ -24,6 +24,7 @@ members = [
     "tools/provision-device",
     "tools/loadtest",
     "tools/steward",
+    "tools/lab-experiment",
     "tests/e2e",
 ]
 default-members = [

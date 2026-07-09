@@ -1,0 +1,70 @@
+{
+  "started_at": "2026-07-09T17:55:42.539457340+00:00",
+  "finished_at": "2026-07-09T17:55:43.745373519+00:00",
+  "ok": true,
+  "steps": [
+    {
+      "name": "api_health",
+      "ok": true,
+      "detail": "http://127.0.0.1:18080"
+    },
+    {
+      "name": "phone_enroll",
+      "ok": true,
+      "detail": "A=f76ce334-1e20-4cf8-b615-9e55089f9434 B=ae88e0cb-8786-4804-8728-138a5c1cc180"
+    },
+    {
+      "name": "phone_bond",
+      "ok": true,
+      "detail": "mutual bond A↔B"
+    },
+    {
+      "name": "embedded_presence",
+      "ok": true,
+      "detail": "both mats occupied"
+    },
+    {
+      "name": "dog_a_call",
+      "ok": true,
+      "detail": "Call pad → invite"
+    },
+    {
+      "name": "dog_b_lure",
+      "ok": true,
+      "detail": "dog-native lure, no phone push"
+    },
+    {
+      "name": "dog_b_accept",
+      "ok": true,
+      "detail": "pad engage → session"
+    },
+    {
+      "name": "session_active",
+      "ok": true,
+      "detail": "session=04cb120c-07a6-498b-8a62-c2f71a30c3da state=Active"
+    },
+    {
+      "name": "dog_a_again",
+      "ok": true,
+      "detail": "soft segment extend"
+    },
+    {
+      "name": "webrtc_portal",
+      "ok": true,
+      "detail": "canis-media Connected + portal hello"
+    },
+    {
+      "name": "dog_a_done",
+      "ok": true,
+      "detail": "session ended by Done pad"
+    },
+    {
+      "name": "phone_estop",
+      "ok": true,
+      "detail": "steward path only"
+    }
+  ],
+  "session_id": "04cb120c-07a6-498b-8a62-c2f71a30c3da",
+  "webrtc_ok": true,
+  "error": null
+}
