@@ -1,6 +1,6 @@
 [package]
 name = "db"
-description = "In-memory data stores for CanisLink alpha"
+description = "CanisLink durable + in-memory stores"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,4 +15,10 @@ policy = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 parking_lot = { workspace = true }
+sqlx = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }

@@ -31,3 +31,6 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 parking_lot = { workspace = true }
+sqlx = { workspace = true }
+sha2 = "0.10"
+hex = "0.4"

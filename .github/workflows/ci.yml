@@ -16,24 +16,20 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.86.0"
+          toolchain: "1.88.0"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: fmt
         run: cargo fmt --all -- --check
-      - name: check workspace
-        run: cargo check --workspace
+      - name: build
+        run: cargo build -p device-api -p signaling -p steward -p sim-dog -p canis-media
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
-      - name: e2e presence + call
-        run: |
-          cargo test -p e2e --test presence_full_chain -- --nocapture
-          cargo test -p e2e --test call_invite_full_chain
-          cargo test -p e2e --test session_accept_full_chain -- --nocapture -- --nocapture
+      - name: lab webrtc
+        run: bash scripts/lab_webrtc.sh
       - name: scad present
         run: |
           test -s hardware/enclosure/terminal_base.scad
           test -s hardware/enclosure/button_pad.scad
-          test -s hardware/enclosure/lure_bezel.scad

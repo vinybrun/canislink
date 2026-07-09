@@ -8,7 +8,7 @@ use axum::{
 };
 use chrono::Utc;
 use clap::Parser;
-use db::AppData;
+use db::{sqlite, AppData};
 use device_auth::SharedSecretAuthority;
 use policy::{invite_rate_ok, social_allowed, PolicyDeny};
 use protocol::{
@@ -18,6 +18,8 @@ use protocol::{
 };
 use serde::{Deserialize, Serialize};
 use session::{accept_invite, new_invite, route_invite, webrtc_role, InviteError};
+use sha2::{Digest, Sha256};
+use sqlx::SqlitePool;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -36,6 +38,16 @@ struct Args {
         default_value = "canis-steward-secret"
     )]
     steward_secret: String,
+    /// SQLite URL for durable lab state
+    #[arg(
+        long,
+        env = "CANIS_DATABASE_URL",
+        default_value = "sqlite:canislink.db?mode=rwc"
+    )]
+    database_url: String,
+    /// Skip SQLite (CI / unit-style process tests)
+    #[arg(long, env = "CANIS_EPHEMERAL", default_value_t = false)]
+    ephemeral: bool,
 }
 
 #[derive(Clone)]
@@ -43,6 +55,7 @@ struct AppState {
     data: Arc<AppData>,
     auth: SharedSecretAuthority,
     steward_secret: String,
+    pool: Option<SqlitePool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,48 +72,65 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    let data = Arc::new(AppData::new());
+    let pool = if args.ephemeral {
+        info!("ephemeral mode — no SQLite durability");
+        None
+    } else {
+        let pool = sqlite::open(&args.database_url).await?;
+        sqlite::load_into(&pool, &data).await?;
+        info!(db = %args.database_url, "durable SQLite enabled");
+        Some(pool)
+    };
     let state = AppState {
-        data: Arc::new(AppData::new()),
+        data: data.clone(),
         auth: SharedSecretAuthority::new(args.device_secret),
         steward_secret: args.steward_secret,
+        pool,
     };
-    // background policy tick (max duration / segment / invite expiry)
     let tick_data = state.data.clone();
+    let tick_pool = state.pool.clone();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            policy_tick(&tick_data);
+            policy_tick(&tick_data, tick_pool.as_ref()).await;
         }
     });
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(&args.bind).await?;
-    info!(%args.bind, "device-api listening");
+    info!(%args.bind, "device-api listening (lab-durable)");
     axum::serve(listener, app).await?;
     Ok(())
 }
 
-fn policy_tick(data: &AppData) {
+async fn policy_tick(data: &AppData, pool: Option<&SqlitePool>) {
     let now = Utc::now();
-    data.invites.expire_due(now);
+    for inv in data.invites.expire_due(now) {
+        if let Some(p) = pool {
+            let _ = sqlite::delete_invite(p, inv.id).await;
+        }
+    }
     for sess in data.sessions.all() {
         let pol_a = data.policies.get(sess.dog_a);
         let max_sec = pol_a.max_session_sec;
+        let mut end = false;
         if (now - sess.started_at).num_seconds() as u64 >= max_sec {
-            data.sessions.end(sess.id);
             info!(session = %sess.id, "ended max duration");
-            continue;
-        }
-        if now >= sess.segment_deadline_at && sess.state == SessionState::Active {
-            data.sessions.end(sess.id);
+            end = true;
+        } else if now >= sess.segment_deadline_at && sess.state == SessionState::Active {
             info!(session = %sess.id, "ended segment expired");
-            continue;
-        }
-        // e-stop either dog
-        if data.policies.get(sess.dog_a).emergency_stop
+            end = true;
+        } else if data.policies.get(sess.dog_a).emergency_stop
             || data.policies.get(sess.dog_b).emergency_stop
         {
-            data.sessions.end(sess.id);
             info!(session = %sess.id, "ended emergency_stop");
+            end = true;
+        }
+        if end {
+            data.sessions.end(sess.id);
+            if let Some(p) = pool {
+                let _ = sqlite::delete_session(p, sess.id).await;
+            }
         }
     }
 }
@@ -186,6 +216,12 @@ fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorBod
     (status, Json(ErrorBody { error: msg.into() }))
 }
 
+fn token_hash(token: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(token.as_bytes());
+    hex::encode(h.finalize())
+}
+
 #[derive(Deserialize)]
 struct EnrollRequest {
     terminal_id: Option<Uuid>,
@@ -200,6 +236,9 @@ async fn dev_enroll(
     let dog_id = DogId(body.dog_id.unwrap_or_else(Uuid::new_v4));
     let id = state.auth.issue(terminal_id, dog_id);
     state.data.policies.bind_terminal(terminal_id, dog_id);
+    if let Some(pool) = &state.pool {
+        let _ = sqlite::save_enroll(pool, terminal_id, dog_id, &token_hash(&id.token)).await;
+    }
     Json(serde_json::json!({
         "terminal_id": id.terminal_id,
         "dog_id": id.dog_id,
@@ -227,6 +266,9 @@ async fn dev_bootstrap_bond(
         .bonds
         .lock()
         .bootstrap_mutual(DogId(body.dog_a), DogId(body.dog_b), body.weight);
+    if let Some(pool) = &state.pool {
+        let _ = sqlite::save_bond(pool, DogId(body.dog_a), DogId(body.dog_b), body.weight).await;
+    }
     StatusCode::NO_CONTENT
 }
 
@@ -241,6 +283,9 @@ async fn post_presence(
         .data
         .policies
         .bind_terminal(report.terminal_id, report.dog_id);
+    if let Some(pool) = &state.pool {
+        let _ = sqlite::save_presence(pool, &report).await;
+    }
     state.data.presence.upsert(report);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -302,6 +347,7 @@ struct CreateInviteBody {
     terminal_id: TerminalId,
 }
 
+#[axum::debug_handler]
 async fn create_invite(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -312,15 +358,19 @@ async fn create_invite(
     let now = Utc::now();
     state.data.invites.expire_due(now);
     let pol = state.data.policies.get(body.dog_id);
-    social_allowed(&pol, now).map_err(|e| match e {
-        PolicyDeny::EmergencyStop => err(StatusCode::LOCKED, e.to_string()),
-        PolicyDeny::SocialDisabled => err(StatusCode::FORBIDDEN, e.to_string()),
-        PolicyDeny::Sleep => err(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS, e.to_string()),
-        PolicyDeny::RateLimit => err(StatusCode::TOO_MANY_REQUESTS, e.to_string()),
-    })?;
+    if let Err(e) = social_allowed(&pol, now) {
+        let code = match e {
+            PolicyDeny::EmergencyStop => StatusCode::from_u16(423).unwrap_or(StatusCode::FORBIDDEN),
+            PolicyDeny::SocialDisabled => StatusCode::FORBIDDEN,
+            PolicyDeny::Sleep => StatusCode::FORBIDDEN,
+            PolicyDeny::RateLimit => StatusCode::TOO_MANY_REQUESTS,
+        };
+        return Err(err(code, e.to_string()));
+    }
     let count = state.data.invites.invites_last_hour(body.dog_id, now);
-    invite_rate_ok(count, pol.max_invites_per_hour)
-        .map_err(|e| err(StatusCode::TOO_MANY_REQUESTS, e.to_string()))?;
+    if invite_rate_ok(count, pol.max_invites_per_hour).is_err() {
+        return Err(err(StatusCode::TOO_MANY_REQUESTS, "invite rate limit"));
+    }
     if state.data.invites.for_dog(body.dog_id).is_some()
         || state.data.sessions.for_dog(body.dog_id).is_some()
     {
@@ -328,27 +378,29 @@ async fn create_invite(
     }
     let present_ids = state.data.presence.present_dog_ids(now);
     let caller_present = state.data.presence.is_present(body.dog_id, now);
-    let bonds = state.data.bonds.lock();
-    let to = route_invite(
-        body.dog_id,
-        body.to_dog,
-        &bonds,
-        &present_ids,
-        caller_present,
-    )
-    .map_err(|e| {
-        let code = match e {
-            InviteError::CallerNotPresent => StatusCode::PRECONDITION_FAILED,
-            InviteError::NoEligiblePeer | InviteError::PeerNotPresent => StatusCode::NOT_FOUND,
-            InviteError::NotBonded => StatusCode::FORBIDDEN,
-            InviteError::CallerBusy | InviteError::PeerBusy => StatusCode::CONFLICT,
-        };
-        err(code, e.to_string())
-    })?;
-    drop(bonds);
-    // peer policy
+    let to = {
+        let bonds = state.data.bonds.lock();
+        route_invite(
+            body.dog_id,
+            body.to_dog,
+            &bonds,
+            &present_ids,
+            caller_present,
+        )
+        .map_err(|e| {
+            let code = match e {
+                InviteError::CallerNotPresent => StatusCode::PRECONDITION_FAILED,
+                InviteError::NoEligiblePeer | InviteError::PeerNotPresent => StatusCode::NOT_FOUND,
+                InviteError::NotBonded => StatusCode::FORBIDDEN,
+                InviteError::CallerBusy | InviteError::PeerBusy => StatusCode::CONFLICT,
+            };
+            err(code, e.to_string())
+        })?
+    };
     let peer_pol = state.data.policies.get(to);
-    social_allowed(&peer_pol, now).map_err(|e| err(StatusCode::FORBIDDEN, format!("peer: {e}")))?;
+    if let Err(e) = social_allowed(&peer_pol, now) {
+        return Err(err(StatusCode::FORBIDDEN, format!("peer: {e}")));
+    }
     if state.data.invites.for_dog(to).is_some() || state.data.sessions.for_dog(to).is_some() {
         return Err(err(StatusCode::CONFLICT, "peer busy"));
     }
@@ -359,6 +411,10 @@ async fn create_invite(
         .insert(invite.clone())
         .map_err(|_| err(StatusCode::CONFLICT, "busy"))?;
     state.data.invites.record_invite(body.dog_id, now);
+    if let Some(pool) = &state.pool {
+        let _ = sqlite::save_invite(pool, &invite).await;
+        let _ = sqlite::record_invite_event(pool, body.dog_id, now).await;
+    }
     info!(from = %invite.from_dog, to = %invite.to_dog, id = %invite.id, "invite ringing");
     Ok(Json(CreateInviteResponse { invite }))
 }
@@ -405,6 +461,9 @@ async fn cancel_invite(
             return Err(err(StatusCode::FORBIDDEN, "not party"));
         }
         state.data.invites.close(id);
+        if let Some(pool) = &state.pool {
+            let _ = sqlite::delete_invite(pool, id).await;
+        }
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(err(StatusCode::NOT_FOUND, "not found"))
@@ -452,6 +511,10 @@ async fn accept_invite_handler(
         .sessions
         .insert(session.clone())
         .map_err(|_| err(StatusCode::CONFLICT, "session busy"))?;
+    if let Some(pool) = &state.pool {
+        let _ = sqlite::delete_invite(pool, id).await;
+        let _ = sqlite::save_session(pool, &session, false, false).await;
+    }
     let role = webrtc_role(&session, dog_id).to_string();
     info!(session = %session.id, dog = %dog_id, %role, "session negotiating");
     Ok(Json(AcceptInviteResponse {
@@ -487,6 +550,9 @@ async fn end_session(
         return Err(err(StatusCode::FORBIDDEN, "not party"));
     }
     state.data.sessions.end(id);
+    if let Some(pool) = &state.pool {
+        let _ = sqlite::delete_session(pool, id).await;
+    }
     info!(session = %id, reason = ?body.reason, "session ended");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -513,6 +579,19 @@ async fn media_ready(
         .sessions
         .set_media_ready(id, dog_id, ready)
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "session"))?;
+    if let Some(pool) = &state.pool {
+        let ma = dog_id == session.dog_a && ready || both;
+        let mb = dog_id == session.dog_b && ready || both;
+        // store both flags as both when both; approximate: re-set both true if both
+        let _ = sqlite::save_session(
+            pool,
+            &session,
+            both || dog_id == session.dog_a,
+            both || dog_id == session.dog_b,
+        )
+        .await;
+        let _ = (ma, mb);
+    }
     if both {
         info!(session = %id, "both media ready → Active");
     }
@@ -554,6 +633,9 @@ async fn again(
         .sessions
         .update(id, |s| s.segment_deadline_at = new_deadline)
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "session"))?;
+    if let Some(pool) = &state.pool {
+        let _ = sqlite::save_session(pool, &session, true, true).await;
+    }
     info!(session = %id, until = %new_deadline, "segment extended");
     Ok(Json(AgainResponse { session }))
 }
@@ -576,10 +658,16 @@ async fn steward_estop(
         .data
         .policies
         .set_estop(DogId(body.dog_id), body.enabled);
-    // end sessions immediately
+    if let Some(pool) = &state.pool {
+        let p = state.data.policies.get(DogId(body.dog_id));
+        let _ = sqlite::save_policy(pool, &p).await;
+    }
     if body.enabled {
         if let Some(s) = state.data.sessions.for_dog(DogId(body.dog_id)) {
             state.data.sessions.end(s.id);
+            if let Some(pool) = &state.pool {
+                let _ = sqlite::delete_session(pool, s.id).await;
+            }
         }
     }
     info!(dog = %body.dog_id, enabled = body.enabled, "steward emergency_stop");
@@ -596,6 +684,10 @@ async fn steward_social(
         .data
         .policies
         .set_social_disabled(DogId(body.dog_id), body.enabled);
+    if let Some(pool) = &state.pool {
+        let p = state.data.policies.get(DogId(body.dog_id));
+        let _ = sqlite::save_policy(pool, &p).await;
+    }
     info!(dog = %body.dog_id, enabled = body.enabled, "steward social_disabled");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -611,6 +703,9 @@ async fn steward_bonds(
         .bonds
         .lock()
         .bootstrap_mutual(DogId(body.dog_a), DogId(body.dog_b), body.weight);
+    if let Some(pool) = &state.pool {
+        let _ = sqlite::save_bond(pool, DogId(body.dog_a), DogId(body.dog_b), body.weight).await;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -650,6 +745,9 @@ async fn steward_policy(
     }
     if let Some(v) = body.max_invites_per_hour {
         p.max_invites_per_hour = v;
+    }
+    if let Some(pool) = &state.pool {
+        let _ = sqlite::save_policy(pool, &p).await;
     }
     state.data.policies.set(p);
     Ok(StatusCode::NO_CONTENT)

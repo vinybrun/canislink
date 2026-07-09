@@ -29,3 +29,5 @@ firmware/mcu/.pio/
 # Python tooling (if any)
 __pycache__/
 .venv/
+canislink.db
+*.db-journal

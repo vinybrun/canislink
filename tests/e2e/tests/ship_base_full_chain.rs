@@ -33,7 +33,7 @@ fn spawn_api(port: u16) -> Child {
     for c in candidates {
         if std::path::Path::new(&c).exists() {
             return Command::new(c)
-                .args(["--bind", &format!("127.0.0.1:{port}")])
+                .args(["--bind", &format!("127.0.0.1:{port}"), "--ephemeral"])
                 .env("CANIS_DEVICE_SECRET", "ship-secret")
                 .env("CANIS_STEWARD_SECRET", "ship-steward")
                 .stdout(Stdio::null())

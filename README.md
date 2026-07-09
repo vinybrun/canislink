@@ -1,50 +1,50 @@
 # CanisLink
 
-**Dog-to-dog social portal network** — standalone terminals where dogs initiate, accept, sustain, and end remote social contact with **no human in the session protocol**.
+Dog-to-dog social terminals: dogs Call / accept / end remote contact. **Humans never accept invites** — they only install, power, and emergency-stop.
 
-**Version:** `0.1.0-alpha` (base control plane ready to ship)
+## Status (honest)
 
-## Repo
+| Milestone | State |
+|-----------|--------|
+| **Research prototype / control plane** | Done |
+| **Lab-shippable software kit** | **This tree** — durable SQLite, steward CLI, real WebRTC datachannel path, sims & tests |
+| **Customer-ready product** | **Not yet** — needs physical kits, camera video UX, hardened identity, field trials |
 
-Public monorepo: https://github.com/vinybrun/canislink
+Version: see [`VERSION`](VERSION) (`0.2.0-lab`).
 
-## What ships in alpha
-
-| # | Feature | Status |
-|---|---------|--------|
-| 01 | Presence | ✅ |
-| 02 | Call invite + lure | ✅ |
-| 03 | Session accept | ✅ |
-| 04 | Session end | ✅ |
-| 05 | Policy + steward e-stop | ✅ |
-| 06 | Config + media_ready + Again | ✅ |
-| 07 | Ship packaging + e2e gate | ✅ |
-| — | WebRTC live AV pixels | 🔜 next |
-
-Humans are infrastructure only (install, power, billing, emergency stop). They never accept invites.
-
-## Quick start
+## Quick lab bring-up
 
 ```bash
 cargo test --workspace
-cargo build -p device-api -p sim-dog
+cargo build -p device-api -p signaling -p steward -p sim-dog -p canis-media
 
+# durable API + signaling
 ./target/debug/device-api --bind 127.0.0.1:8080 &
-./target/debug/sim-dog --api http://127.0.0.1:8080 --scenario ship
+./target/debug/signaling --bind 127.0.0.1:8081 &
+
+# human install
+./target/debug/steward enroll
+./target/debug/steward enroll
+./target/debug/steward bond --dog-a <A> --dog-b <B>
+
+# dog social control plane (emulated hardware)
+./target/debug/sim-dog --api http://127.0.0.1:8080 --scenario session
+
+# real WebRTC between two media processes
+SESSION=$(uuidgen)
+./target/debug/canis-media --session $SESSION --dog $(uuidgen) --role answerer &
+sleep 0.5
+./target/debug/canis-media --session $SESSION --dog $(uuidgen) --role offerer
 ```
+
+Ephemeral (no disk) for CI: `CANIS_EPHEMERAL=1` or `--ephemeral`.
 
 ## Docs
 
+- Lab kit & install: [`docs/lab/LAB_KIT.md`](docs/lab/LAB_KIT.md)
+- Definition of done: [`docs/lab/DEFINITION_OF_DONE.md`](docs/lab/DEFINITION_OF_DONE.md)
 - Architecture: [`docs/architecture/canislink-system-architecture.md`](docs/architecture/canislink-system-architecture.md)
-- Alpha runbook: [`docs/runbooks/alpha-ship.md`](docs/runbooks/alpha-ship.md)
-- Features: [`docs/features/`](docs/features/)
-
-## Hardware / 3D
-
-- `hardware/enclosure/*.scad` — mat, pads, lure bezel
-- `hardware/electronics/` — presence, lure, session LEDs
-- `hardware/bom/prototype.csv`
-- `firmware/mcu-emu` + `firmware/mcu/`
+- Alpha runbook (control plane): [`docs/runbooks/alpha-ship.md`](docs/runbooks/alpha-ship.md)
 
 ## License
 

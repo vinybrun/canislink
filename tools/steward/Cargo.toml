@@ -1,6 +1,6 @@
 [package]
-name = "media-signal"
-description = "WebRTC signaling message types"
+name = "steward"
+description = "Human install / ops CLI (never in dog session accept path)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,8 +8,15 @@ repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "steward"
+path = "src/main.rs"
+
 [dependencies]
-protocol = { workspace = true }
+clap = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
 uuid = { workspace = true }

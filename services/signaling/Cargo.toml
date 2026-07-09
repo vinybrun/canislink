@@ -1,6 +1,6 @@
 [package]
 name = "signaling"
-description = "WebRTC signaling (alpha scaffold)"
+description = "WebRTC signaling rooms"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,10 +13,16 @@ name = "signaling"
 path = "src/main.rs"
 
 [dependencies]
+media-signal = { workspace = true }
+protocol = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+futures-util = { workspace = true }
+dashmap = { workspace = true }
+uuid = { workspace = true }
