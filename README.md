@@ -14,6 +14,8 @@ Public monorepo: Rust cloud + edge, MCU emulator/firmware reference, hardware do
 |---|---------|--------|-----|
 | 01 | **Presence** (mat → MCU → edge → cloud) | implemented | [docs/features/01-presence.md](docs/features/01-presence.md) |
 | 02 | **Call invite** | implemented | [docs/features/02-call-invite.md](docs/features/02-call-invite.md) |
+| 03 | **Session accept** | implemented | [docs/features/03-session-accept.md](docs/features/03-session-accept.md) |
+| 04 | **Session end** | implemented | [docs/features/04-session-end.md](docs/features/04-session-end.md) |
 | 03 | Accept + session | planned | — |
 
 ## Quick start

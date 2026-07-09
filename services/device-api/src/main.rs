@@ -11,11 +11,11 @@ use clap::Parser;
 use db::AppData;
 use device_auth::SharedSecretAuthority;
 use protocol::{
-    CreateInviteRequest, CreateInviteResponse, DogId, IncomingInviteOffer, InviteMode, LureConfig,
-    PresenceReport, PresenceView, TerminalId,
+    AcceptInviteResponse, CreateInviteRequest, CreateInviteResponse, DogId, EndSessionRequest,
+    IncomingInviteOffer, InviteId, LureConfig, PresenceReport, PresenceView, SessionId, TerminalId,
 };
 use serde::{Deserialize, Serialize};
-use session::{new_invite, route_invite, InviteError};
+use session::{accept_invite, new_invite, route_invite, webrtc_role, InviteError};
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -76,6 +76,12 @@ fn router(state: AppState) -> Router {
         .route("/v1/invites", post(create_invite))
         .route("/v1/invites/incoming", get(incoming_invite))
         .route("/v1/invites/{invite_id}/cancel", post(cancel_invite))
+        .route(
+            "/v1/invites/{invite_id}/accept",
+            post(accept_invite_handler),
+        )
+        .route("/v1/sessions/active", get(active_session))
+        .route("/v1/sessions/{session_id}/end", post(end_session))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -416,8 +422,184 @@ async fn cancel_invite(
     }
 }
 
-// silence unused import warning if InviteMode only used via body
-#[allow(dead_code)]
-fn _mode() -> InviteMode {
-    InviteMode::Portal
+async fn accept_invite_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(invite_id): Path<Uuid>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<AcceptInviteResponse>, (StatusCode, Json<ErrorBody>)> {
+    let (terminal_id, token) = extract_device_token(&headers).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody {
+                error: "unauthorized".into(),
+            }),
+        )
+    })?;
+    let dog_id = body
+        .get("dog_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .map(DogId)
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: "dog_id required".into(),
+            }),
+        ))?;
+    let tid = body
+        .get("terminal_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .map(TerminalId)
+        .unwrap_or(terminal_id);
+    if tid != terminal_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorBody {
+                error: "terminal mismatch".into(),
+            }),
+        ));
+    }
+    state
+        .auth
+        .verify_pair(terminal_id, dog_id, &token)
+        .map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorBody {
+                    error: "invalid token".into(),
+                }),
+            )
+        })?;
+
+    let now = Utc::now();
+    state.data.invites.expire_due(now);
+    let id = InviteId(invite_id);
+    let invite = state.data.invites.get(id).ok_or((
+        StatusCode::NOT_FOUND,
+        Json(ErrorBody {
+            error: "invite not found".into(),
+        }),
+    ))?;
+    let present = state.data.presence.is_present(dog_id, now);
+    let session = accept_invite(&invite, dog_id, present, now).map_err(|e| {
+        (
+            StatusCode::PRECONDITION_FAILED,
+            Json(ErrorBody {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    state.data.invites.close(id);
+    state.data.sessions.insert(session.clone()).map_err(|_| {
+        (
+            StatusCode::CONFLICT,
+            Json(ErrorBody {
+                error: "session busy".into(),
+            }),
+        )
+    })?;
+    let role = webrtc_role(&session, dog_id).to_string();
+    info!(session = %session.id, dog = %dog_id, %role, "session active (media stub)");
+    Ok(Json(AcceptInviteResponse {
+        session,
+        webrtc_role: role,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ActiveQuery {
+    dog_id: Uuid,
+    terminal_id: Uuid,
+}
+
+async fn active_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<ActiveQuery>,
+) -> Result<Json<Option<protocol::SessionRecord>>, (StatusCode, Json<ErrorBody>)> {
+    let (terminal_id, token) = extract_device_token(&headers).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody {
+                error: "unauthorized".into(),
+            }),
+        )
+    })?;
+    let dog_id = DogId(q.dog_id);
+    let tid = TerminalId(q.terminal_id);
+    if tid != terminal_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorBody {
+                error: "terminal mismatch".into(),
+            }),
+        ));
+    }
+    state.auth.verify_pair(tid, dog_id, &token).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody {
+                error: "invalid token".into(),
+            }),
+        )
+    })?;
+    Ok(Json(state.data.sessions.for_dog(dog_id)))
+}
+
+async fn end_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<Uuid>,
+    Json(body): Json<EndSessionRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    let (terminal_id, token) = extract_device_token(&headers).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorBody {
+                error: "unauthorized".into(),
+            }),
+        )
+    })?;
+    if terminal_id != body.terminal_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorBody {
+                error: "terminal mismatch".into(),
+            }),
+        ));
+    }
+    state
+        .auth
+        .verify_pair(body.terminal_id, body.dog_id, &token)
+        .map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorBody {
+                    error: "invalid token".into(),
+                }),
+            )
+        })?;
+    let id = SessionId(session_id);
+    let Some(sess) = state.data.sessions.get(id) else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: "not found".into(),
+            }),
+        ));
+    };
+    if sess.dog_a != body.dog_id && sess.dog_b != body.dog_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorBody {
+                error: "not party".into(),
+            }),
+        ));
+    }
+    state.data.sessions.end(id);
+    info!(session = %id, reason = ?body.reason, "session ended");
+    let _ = body.reason;
+    Ok(StatusCode::NO_CONTENT)
 }

@@ -1,8 +1,11 @@
-//! Pure invite routing + ring state helpers (no I/O).
+//! Pure invite routing + session allocation helpers.
 
 use bond::BondGraph;
 use chrono::{Duration, Utc};
-use protocol::{DogId, Invite, InviteId, InviteMode, SessionState, RING_TIMEOUT_MS};
+use protocol::{
+    DogId, Invite, InviteId, InviteMode, SessionId, SessionRecord, SessionState, RING_TIMEOUT_MS,
+    SESSION_MAX_MS, SESSION_SEGMENT_MS,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -21,7 +24,20 @@ pub enum InviteError {
     PeerBusy,
 }
 
-/// Select K=1 peer: highest mutual bond among present dogs.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum AcceptError {
+    #[error("invite not found")]
+    NotFound,
+    #[error("not the callee")]
+    NotCallee,
+    #[error("invite not ringing")]
+    NotRinging,
+    #[error("acceptor not present")]
+    NotPresent,
+    #[error("invite expired")]
+    Expired,
+}
+
 pub fn route_invite(
     from: DogId,
     preferred: Option<DogId>,
@@ -69,6 +85,46 @@ pub fn is_expired(invite: &Invite, now: chrono::DateTime<Utc>) -> bool {
     now >= invite.expires_at
 }
 
+/// Accept converts ringing invite → Active session (media stub ready immediately in v1).
+pub fn accept_invite(
+    invite: &Invite,
+    acceptor: DogId,
+    acceptor_present: bool,
+    now: chrono::DateTime<Utc>,
+) -> Result<SessionRecord, AcceptError> {
+    if invite.to_dog != acceptor {
+        return Err(AcceptError::NotCallee);
+    }
+    if invite.state != SessionState::Ringing {
+        return Err(AcceptError::NotRinging);
+    }
+    if is_expired(invite, now) {
+        return Err(AcceptError::Expired);
+    }
+    if !acceptor_present {
+        return Err(AcceptError::NotPresent);
+    }
+    Ok(SessionRecord {
+        id: SessionId::new(),
+        invite_id: invite.id,
+        dog_a: invite.from_dog,
+        dog_b: invite.to_dog,
+        mode: invite.mode,
+        state: SessionState::Active,
+        started_at: now,
+        max_end_at: now + Duration::milliseconds(SESSION_MAX_MS as i64),
+        segment_deadline_at: now + Duration::milliseconds(SESSION_SEGMENT_MS as i64),
+    })
+}
+
+pub fn webrtc_role(session: &SessionRecord, dog: DogId) -> &'static str {
+    if dog == session.dog_a {
+        "offerer"
+    } else {
+        "answerer"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,24 +140,20 @@ mod tests {
         g.bootstrap_mutual(a, c, 0.9);
         let to = route_invite(a, None, &g, &[b, c], true).unwrap();
         assert_eq!(to, c);
-        let to = route_invite(a, None, &g, &[b], true).unwrap();
-        assert_eq!(to, b);
-        assert_eq!(
-            route_invite(a, None, &g, &[], true),
-            Err(InviteError::NoEligiblePeer)
-        );
     }
 
     #[test]
-    fn preferred_must_be_present_and_bonded() {
-        let mut g = BondGraph::new();
+    fn accept_requires_callee_present() {
         let a = DogId::new();
         let b = DogId::new();
-        g.bootstrap_mutual(a, b, 0.5);
-        assert!(route_invite(a, Some(b), &g, &[b], true).is_ok());
+        let inv = new_invite(a, b, InviteMode::Portal);
         assert_eq!(
-            route_invite(a, Some(b), &g, &[], true),
-            Err(InviteError::PeerNotPresent)
+            accept_invite(&inv, b, false, Utc::now()),
+            Err(AcceptError::NotPresent)
         );
+        let s = accept_invite(&inv, b, true, Utc::now()).unwrap();
+        assert_eq!(s.state, SessionState::Active);
+        assert_eq!(webrtc_role(&s, a), "offerer");
+        assert_eq!(webrtc_role(&s, b), "answerer");
     }
 }

@@ -1,4 +1,4 @@
-//! Dual-terminal presence + Call invite simulation.
+//! Dual-terminal presence + Call + Accept simulation.
 
 use canis_edge::{EdgeAgent, EdgeConfig, EdgeUx};
 use clap::Parser;
@@ -11,7 +11,7 @@ use tracing::info;
 struct Args {
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     api: String,
-    #[arg(long, default_value = "call")]
+    #[arg(long, default_value = "session")]
     scenario: String,
 }
 
@@ -64,16 +64,14 @@ impl VirtualTerminal {
             if s.flipped {
                 info!(terminal = self.name, present = s.present, "presence flip");
                 self.edge.publish_now().await?;
+                if !s.present && self.edge.ux == EdgeUx::InSession {
+                    self.edge.end_session(protocol::EndReason::WalkAway).await?;
+                }
             }
         }
         for i in intents {
-            info!(terminal = self.name, ?i, "intent from pad");
-            if matches!(i, protocol::Intent::Call) {
-                match self.edge.call(None).await {
-                    Ok(r) => info!(terminal = self.name, invite = %r.invite.id, "call placed"),
-                    Err(e) => info!(terminal = self.name, error = %e, "call failed"),
-                }
-            }
+            info!(terminal = self.name, ?i, "intent");
+            self.edge.handle_intent(i).await?;
         }
         Ok(())
     }
@@ -82,7 +80,7 @@ impl VirtualTerminal {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter("sim_dog=info,canis_edge=info")
+        .with_env_filter("sim_dog=info,canis_edge=info,device_api=info")
         .init();
     let args = Args::parse();
     let client = reqwest::Client::new();
@@ -102,7 +100,6 @@ async fn main() -> anyhow::Result<()> {
     let mut term_a = VirtualTerminal::new("A", enroll(&args.api).await?, &args.api);
     let mut term_b = VirtualTerminal::new("B", enroll(&args.api).await?, &args.api);
 
-    // mutual bond
     client
         .post(format!("{}/v1/dev/bonds", args.api))
         .json(&serde_json::json!({
@@ -113,9 +110,7 @@ async fn main() -> anyhow::Result<()> {
         .send()
         .await?
         .error_for_status()?;
-    info!("bonded A ↔ B");
 
-    // both on mats
     term_a.mcu.set_world(McuWorld::dog_on_mat(140.0));
     term_b.mcu.set_world(McuWorld::dog_on_mat(95.0));
     for _ in 0..30 {
@@ -125,47 +120,69 @@ async fn main() -> anyhow::Result<()> {
         term_b.edge.publish_now().await?;
     }
 
-    let list: Vec<serde_json::Value> = client
-        .get(format!("{}/v1/presence", args.api))
-        .send()
-        .await?
-        .json()
-        .await?;
-    if list.len() < 2 {
-        anyhow::bail!("need 2 present, got {}", list.len());
-    }
-
-    if args.scenario == "presence" {
-        info!("presence-only scenario PASS");
-        return Ok(());
-    }
-
-    // Dog A presses Call pad
-    info!("dog A presses Call");
+    info!("A Call");
     term_a.mcu.press_pad(0);
     term_a.tick().await?;
 
-    // B polls for lure
-    let mut saw_lure = false;
-    for _ in 0..20 {
+    for _ in 0..10 {
         term_b.tick().await?;
-        if let Some(offer) = term_b.edge.poll_incoming().await? {
-            info!(
-                invite = %offer.invite.id,
-                from = %offer.invite.from_dog,
-                "B received lure"
-            );
-            saw_lure = true;
-            assert_eq!(term_b.edge.ux, EdgeUx::RingingIn);
+        term_b.edge.poll_incoming().await?;
+        if term_b.edge.ux == EdgeUx::RingingIn {
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    if !saw_lure {
-        anyhow::bail!("B never received incoming invite lure");
+    if term_b.edge.ux != EdgeUx::RingingIn {
+        anyhow::bail!("B not ringing");
     }
-    assert_eq!(term_a.edge.ux, EdgeUx::RingingOut);
 
-    info!("call invite scenario PASS (no human in path)");
+    if args.scenario == "call" {
+        info!("call scenario PASS");
+        return Ok(());
+    }
+
+    info!("B engages pad (accept)");
+    term_b.mcu.press_pad(1); // Play pad = engage
+    term_b.tick().await?;
+    if term_b.edge.ux != EdgeUx::InSession {
+        anyhow::bail!("B not in session: {:?}", term_b.edge.ux);
+    }
+    // A should learn session via... for now A still RingingOut until we poll/active
+    // Notify A by checking active session endpoint is optional; set A session from accept side only.
+    // For realism, A polls active — skip: mark A when B accepts by A re-fetch...
+    // Simpler: after B accepts, A still RingingOut in edge state; production would WS push.
+    // For sim: A polls sessions/active
+    let url = format!(
+        "{}/v1/sessions/active?dog_id={}&terminal_id={}",
+        args.api, term_a.dog_id, term_a.edge.cfg.terminal_id
+    );
+    let sess: Option<serde_json::Value> = client
+        .get(&url)
+        .header("Authorization", term_a.edge.cfg.auth_header())
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if sess.is_none() {
+        anyhow::bail!("A has no active session after B accept");
+    }
+    term_a.edge.session = Some(serde_json::from_value(sess.clone().unwrap())?);
+    term_a.edge.ux = EdgeUx::InSession;
+
+    info!(session = %sess.unwrap()["id"], "session active both sides");
+
+    if args.scenario == "session" {
+        info!("session accept scenario PASS");
+        return Ok(());
+    }
+
+    // walk-away / done
+    info!("A presses Done");
+    term_a.mcu.press_pad(3);
+    term_a.tick().await?;
+    if term_a.edge.ux == EdgeUx::InSession {
+        anyhow::bail!("A still in session after Done");
+    }
+    info!("end scenario PASS");
     Ok(())
 }

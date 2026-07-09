@@ -292,3 +292,40 @@ pub enum InviteCloseReason {
     PolicyDenied,
     PeerOffline,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionRecord {
+    pub id: SessionId,
+    pub invite_id: InviteId,
+    pub dog_a: DogId,
+    pub dog_b: DogId,
+    pub mode: InviteMode,
+    pub state: SessionState,
+    pub started_at: DateTime<Utc>,
+    pub max_end_at: DateTime<Utc>,
+    pub segment_deadline_at: DateTime<Utc>,
+}
+
+/// Soft segment 5 min; hard max 15 min (architecture).
+pub const SESSION_SEGMENT_MS: u64 = 300_000;
+pub const SESSION_MAX_MS: u64 = 900_000;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AcceptInviteRequest {
+    pub dog_id: DogId,
+    pub terminal_id: TerminalId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AcceptInviteResponse {
+    pub session: SessionRecord,
+    /// WebRTC role for this dog: "offerer" if initiator, else "answerer"
+    pub webrtc_role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EndSessionRequest {
+    pub dog_id: DogId,
+    pub terminal_id: TerminalId,
+    pub reason: EndReason,
+}

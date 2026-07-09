@@ -30,7 +30,8 @@ jobs:
       - name: e2e presence + call
         run: |
           cargo test -p e2e --test presence_full_chain -- --nocapture
-          cargo test -p e2e --test call_invite_full_chain -- --nocapture
+          cargo test -p e2e --test call_invite_full_chain
+          cargo test -p e2e --test session_accept_full_chain -- --nocapture -- --nocapture
       - name: scad present
         run: |
           test -s hardware/enclosure/terminal_base.scad

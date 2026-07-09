@@ -1,12 +1,14 @@
-//! In-memory stores for early production path.
+//! In-memory stores for presence, bonds, invites, sessions.
 
 use bond::BondGraph;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use protocol::{
-    DogId, ForceBand, Invite, InviteId, PresenceReport, PresenceView, TerminalId, PRESENCE_TTL_MS,
+    DogId, ForceBand, Invite, InviteId, PresenceReport, PresenceView, SessionId, SessionRecord,
+    SessionState, TerminalId, PRESENCE_TTL_MS,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -99,9 +101,8 @@ impl PresenceStore {
 
 #[derive(Debug, Default)]
 pub struct InviteStore {
-    by_id: Mutex<std::collections::HashMap<InviteId, Invite>>,
-    /// dog -> open invite they initiated or are receiving
-    open_for_dog: Mutex<std::collections::HashMap<DogId, InviteId>>,
+    by_id: Mutex<HashMap<InviteId, Invite>>,
+    open_for_dog: Mutex<HashMap<DogId, InviteId>>,
 }
 
 impl InviteStore {
@@ -126,13 +127,13 @@ impl InviteStore {
 
     pub fn for_dog(&self, dog: DogId) -> Option<Invite> {
         let open = self.open_for_dog.lock();
-        let id = open.get(&dog)?;
-        self.by_id.lock().get(id).cloned()
+        let id = *open.get(&dog)?;
+        self.by_id.lock().get(&id).cloned()
     }
 
     pub fn incoming_for(&self, dog: DogId) -> Option<Invite> {
         self.for_dog(dog)
-            .filter(|i| i.to_dog == dog && i.state == protocol::SessionState::Ringing)
+            .filter(|i| i.to_dog == dog && i.state == SessionState::Ringing)
     }
 
     pub fn close(&self, id: InviteId) -> Option<Invite> {
@@ -156,10 +157,53 @@ impl InviteStore {
 }
 
 #[derive(Debug, Default)]
+pub struct SessionStore {
+    by_id: Mutex<HashMap<SessionId, SessionRecord>>,
+    by_dog: Mutex<HashMap<DogId, SessionId>>,
+}
+
+impl SessionStore {
+    pub fn insert(&self, session: SessionRecord) -> Result<(), &'static str> {
+        let mut by_dog = self.by_dog.lock();
+        if by_dog.contains_key(&session.dog_a) || by_dog.contains_key(&session.dog_b) {
+            return Err("busy");
+        }
+        by_dog.insert(session.dog_a, session.id);
+        by_dog.insert(session.dog_b, session.id);
+        self.by_id.lock().insert(session.id, session);
+        Ok(())
+    }
+
+    pub fn get(&self, id: SessionId) -> Option<SessionRecord> {
+        self.by_id.lock().get(&id).cloned()
+    }
+
+    pub fn for_dog(&self, dog: DogId) -> Option<SessionRecord> {
+        let id = *self.by_dog.lock().get(&dog)?;
+        self.get(id)
+    }
+
+    pub fn end(&self, id: SessionId) -> Option<SessionRecord> {
+        let s = self.by_id.lock().remove(&id)?;
+        let mut by_dog = self.by_dog.lock();
+        by_dog.remove(&s.dog_a);
+        by_dog.remove(&s.dog_b);
+        Some(s)
+    }
+
+    pub fn set_state(&self, id: SessionId, state: SessionState) {
+        if let Some(s) = self.by_id.lock().get_mut(&id) {
+            s.state = state;
+        }
+    }
+}
+
+#[derive(Debug, Default)]
 pub struct AppData {
     pub presence: PresenceStore,
     pub bonds: Mutex<BondGraph>,
     pub invites: InviteStore,
+    pub sessions: SessionStore,
 }
 
 impl AppData {
