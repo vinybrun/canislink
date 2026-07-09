@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/session",
+    "crates/policy",
+    "crates/bond",
+    "crates/presence",
+    "crates/device-auth",
+    "crates/media-signal",
+    "crates/telemetry",
+    "crates/db",
+    "services/device-api",
+    "services/signaling",
+    "services/steward-api",
+    "services/policy-worker",
+    "services/telemetry-ingest",
+    "edge/canis-edge",
+    "edge/canis-media",
+    "edge/canis-sense",
+    "edge/canis-health",
+    "tools/sim-dog",
+    "tools/provision-device",
+    "tools/loadtest",
+]
+default-members = [
+    "crates/protocol",
+    "crates/session",
+    "crates/policy",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+repository = "https://github.com/vinybrun/canislink"
+authors = ["CanisLink Contributors"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Shared versions (filled as crates grow)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+tracing = "0.1"

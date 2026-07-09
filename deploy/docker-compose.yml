@@ -1,0 +1,14 @@
+# Dev stack scaffold — filled in PR-09 (Postgres, Redis, coturn, device-api, …)
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: canis
+      POSTGRES_PASSWORD: canis
+      POSTGRES_DB: canislink
+    ports:
+      - "5432:5432"
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"

@@ -1,0 +1,31 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!deploy/dev-ca/README.md
+
+# Build / logs
+*.log
+dist/
+out/
+
+# Firmware / embedded
+firmware/mcu/build/
+firmware/mcu/.pio/
+
+# Python tooling (if any)
+__pycache__/
+.venv/

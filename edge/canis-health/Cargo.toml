@@ -1,0 +1,11 @@
+[package]
+name = "canis-health"
+description = "CanisLink edge binary: canis-health"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]

@@ -1,0 +1,11 @@
+[package]
+name = "signaling"
+description = "CanisLink cloud service: signaling"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]

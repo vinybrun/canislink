@@ -1,0 +1,10 @@
+item,qty_per_terminal,notes,est_usd
+Raspberry Pi CM4 8GB + IO board,1,Lab reference SBC,120
+HDMI monitor 21-27in,1,Lab display at dog eye-line,80
+USB camera (1080p UVC),1,Dog-height mount,30
+USB mic + speakers,1,Full-duplex audio path,40
+Large arcade/silicone pads 100mm,4,Call Play Again Done; blue/textured,40
+Presence mat / FSR or ToF,1,Occupancy not biometrics,25
+MCU (nRF52840 or STM32),1,Buttons LEDs presence watchdog,15
+LED indicators,1,Feedback ring/strip,10
+Misc cabling enclosure draft,1,Non-slip base,40
