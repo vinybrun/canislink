@@ -1,0 +1,30 @@
+* { box-sizing: border-box; }
+body {
+  margin: 0; font-family: system-ui, sans-serif;
+  background: #0b1020; color: #e8eefc;
+}
+#app { max-width: 720px; margin: 0 auto; padding: 12px; }
+header h1 { margin: 0; font-size: 1.4rem; color: #7eb6ff; }
+.sub { margin: 4px 0 12px; opacity: 0.7; font-size: 0.9rem; }
+.card {
+  background: #151b2f; border-radius: 12px; padding: 12px;
+  margin-bottom: 12px; border: 1px solid #243056;
+}
+label { display: block; font-size: 0.8rem; margin: 6px 0; opacity: 0.9; }
+input {
+  width: 100%; margin-top: 2px; padding: 8px; border-radius: 8px;
+  border: 1px solid #334; background: #0d1324; color: #fff;
+}
+button {
+  margin: 6px 4px 0 0; padding: 10px 14px; border-radius: 10px;
+  border: none; background: #2a3558; color: #fff; font-weight: 600;
+}
+button.primary { background: #2f6fed; }
+button:disabled { opacity: 0.4; }
+.videos { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.vid span { font-size: 0.75rem; opacity: 0.7; }
+video {
+  width: 100%; aspect-ratio: 3/4; background: #000; border-radius: 10px;
+  object-fit: cover;
+}
+#log { font-size: 0.75rem; max-height: 120px; overflow: auto; white-space: pre-wrap; opacity: 0.85; }

@@ -1,24 +1,22 @@
 # Changelog
 
-## 0.2.0-lab — 2026-07-09
+## 0.3.0-android-lab — 2026-07-09
 
-**Honest status:** lab-shippable software kit — not a consumer product.
+### Anticipated gaps + Android video path
 
-### Lab-shippable software
+- Fail-path tests: offline peer, caller not present, sleep/rate limit, busy invite
+- **portal-web**: browser/WebView dog video call UI (getUserMedia + WebRTC)
+- **device-api** serves portal at `/portal/`
+- **Android app** (`android/`): WebView wrapper, camera/mic permissions — **phone = dog camera+screen**
+- `scripts/android_e2e.sh`: emulator install, control-plane call/accept, portal autostart, host chromium peer
+- Docs: `ANTICIPATED_GAPS.md`
 
-- **SQLite durability** for enrollments, bonds, policies, invites, sessions (survives API restart)
-- **Steward CLI** (`steward enroll|bond|estop|social-disable|health`) — human install path only
-- **Real WebRTC**: signaling rooms + `canis-media` peer connections reach `Connected` with `canis-portal` datachannel
-- **Lab kit docs**: BOM, install steps, definition of done (`docs/lab/`)
-- README no longer claims customer-ready ship
+Honest: full two-way video quality on emulator is lab-grade (fake media host peer); not Play Store shipping.
 
-### Still not customer-ready
+## 0.2.0-lab
 
-- Physical terminal manufacturing / field hardware validation
-- Camera encode → dog-facing display video
-- Production mTLS / multi-tenant cloud
-- App store companion UX
+Lab-shippable software kit (SQLite, steward, WebRTC datachannel).
 
-## 0.1.0-alpha — 2026-07-09
+## 0.1.0-alpha
 
-Control plane prototype (sim + tests). Over-marketed as ship-ready; corrected in 0.2.0-lab.
+Control plane prototype.

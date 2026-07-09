@@ -1,0 +1,17 @@
+{
+  "ok": true,
+  "session_id": "2a4148e8-6859-4d25-8a11-133f19b7cce4",
+  "invite_id": "29aac38a-9438-42cd-932a-e9f040c7a3d3",
+  "dog_a": "41eb396a-6d4e-4421-9016-168db20714d0",
+  "dog_b": "2018a303-5780-404a-9920-640b48a4dc2a",
+  "both_media_ready": true,
+  "session_state": "active",
+  "android_device": "emulator-5554",
+  "android_app_resumed": true,
+  "portal_url_android": "autostart answerer via 10.0.2.2",
+  "host_peer": "chromium headless offerer with fake media",
+  "apk": "/work/android/app/build/outputs/apk/debug/app-debug.apk",
+  "screenshot": "docs/lab/android-screencap.png",
+  "architecture_shift": "Android phone is dog camera+screen instead of custom AV hardware",
+  "fail_paths": "tests/e2e/tests/fail_paths.rs"
+}

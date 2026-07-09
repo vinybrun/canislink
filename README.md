@@ -57,3 +57,17 @@ MIT OR Apache-2.0
 ```
 
 Runs phone emulators (enroll/bond/estop) + embedded MCU/edge terminals + WebRTC media peers. Report: `docs/lab/experiment-report.json`. Details: [`docs/lab/LOCAL_EXPERIMENT.md`](docs/lab/LOCAL_EXPERIMENT.md).
+
+## Android dog video portal (emulator)
+
+Phone replaces custom AV hardware for lab:
+
+```bash
+# with emulator already running (AVD CanisLab)
+./scripts/android_e2e.sh
+```
+
+- Web portal: `portal-web/` (served at `/portal/`)
+- Android WebView app: `android/`
+- Report: `docs/lab/android-e2e-report.json`
+- Anticipated gaps: `docs/lab/ANTICIPATED_GAPS.md`

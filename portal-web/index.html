@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>CanisLink Portal</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>CanisLink</h1>
+      <p class="sub">Dog video portal (phone = camera + screen)</p>
+    </header>
+
+    <section id="setup" class="card">
+      <label>API base <input id="apiBase" value="http://10.0.2.2:18080" /></label>
+      <label>Signal WS <input id="signalBase" value="ws://10.0.2.2:18081" /></label>
+      <label>Device token <input id="token" placeholder="from enroll" /></label>
+      <label>Terminal ID <input id="terminalId" /></label>
+      <label>Dog ID <input id="dogId" /></label>
+      <button id="btnSave">Save identity</button>
+      <button id="btnPresent">I'm present (mat substitute)</button>
+    </section>
+
+    <section id="status" class="card">
+      <div>UX: <strong id="uxState">idle</strong></div>
+      <div>Session: <code id="sessionId">—</code></div>
+      <div id="log"></div>
+    </section>
+
+    <section id="video" class="card videos">
+      <div class="vid">
+        <span>Remote dog</span>
+        <video id="remoteVideo" autoplay playsinline></video>
+      </div>
+      <div class="vid">
+        <span>Local (this phone)</span>
+        <video id="localVideo" autoplay playsinline muted></video>
+      </div>
+    </section>
+
+    <section class="card actions">
+      <button id="btnCall" class="primary">Call friend</button>
+      <button id="btnAccept" class="primary" disabled>Accept (engage)</button>
+      <button id="btnDone">Done</button>
+      <button id="btnPoll">Poll lure</button>
+    </section>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

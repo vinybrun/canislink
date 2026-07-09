@@ -1,0 +1,30 @@
+plugins {
+    id 'com.android.application'
+}
+android {
+    namespace 'com.canislink.portal'
+    compileSdk 34
+    defaultConfig {
+        applicationId "com.canislink.portal"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "0.2.0-lab"
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+        debug {
+            // cleartext for lab 10.0.2.2
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+}

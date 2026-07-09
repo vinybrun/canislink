@@ -21,6 +21,7 @@ use session::{accept_invite, new_invite, route_invite, webrtc_role, InviteError}
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use std::sync::Arc;
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use uuid::Uuid;
@@ -162,6 +163,7 @@ fn router(state: AppState) -> Router {
         .route("/v1/steward/social_disabled", post(steward_social))
         .route("/v1/steward/bonds", post(steward_bonds))
         .route("/v1/steward/policy", post(steward_policy))
+        .nest_service("/portal", ServeDir::new(std::env::var("CANIS_PORTAL_DIR").unwrap_or_else(|_| "portal-web".into())))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
