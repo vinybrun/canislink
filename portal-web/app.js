@@ -39,6 +39,60 @@
     $("terminalId").value = state.terminalId;
     $("dogId").value = state.dogId;
   }
+
+  let deviceWs = null;
+  function connectDeviceWs() {
+    if (!state.token || !state.dogId || !state.terminalId) return;
+    if (deviceWs) try { deviceWs.close(); } catch (_) {}
+    const base = state.api.replace(/^http/, "ws");
+    const q = new URLSearchParams({
+      dog_id: state.dogId,
+      terminal_id: state.terminalId,
+      token: state.token,
+    });
+    const url = `${base}/v1/ws?${q}`;
+    deviceWs = new WebSocket(url);
+    deviceWs.onopen = () => log("device WS open (invite push)");
+    deviceWs.onclose = () => {
+      log("device WS closed — reconnect in 2s");
+      setTimeout(connectDeviceWs, 2000);
+    };
+    deviceWs.onerror = () => log("device WS error");
+    deviceWs.onmessage = (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.event === "invite_ringing" || msg.event === "InviteRinging") {
+        // serde externally tagged: {"event":"invite_ringing","invite":...}
+      }
+      // handle both external tag styles
+      const event = msg.event || Object.keys(msg)[0];
+      const body = msg.invite ? msg : msg[event] || msg;
+      if (event === "invite_ringing" || msg.invite) {
+        const inv = msg.invite || body.invite;
+        if (inv) {
+          state.invite = inv;
+          setUx("ringing_in");
+          $("btnAccept").disabled = false;
+          log("PUSH lure invite from " + inv.from_dog);
+          document.body.style.outline = "4px solid #2f6fed";
+          setTimeout(() => (document.body.style.outline = ""), 1000);
+        }
+      } else if (event === "session_updated" || msg.session) {
+        const sess = msg.session || body.session;
+        if (sess) {
+          state.session = sess;
+          $("sessionId").textContent = sess.id;
+          log("PUSH session " + sess.id + " " + sess.state);
+        }
+      } else if (event === "session_ended") {
+        log("PUSH session ended");
+        setUx("idle");
+      } else if (msg.event === "hello") {
+        log("device WS hello");
+      }
+    };
+  }
+
   function saveForm() {
     state.api = $("apiBase").value.trim().replace(/\/$/, "");
     state.signal = $("signalBase").value.trim().replace(/\/$/, "");
@@ -51,6 +105,7 @@
     localStorage.setItem("terminalId", state.terminalId);
     localStorage.setItem("dogId", state.dogId);
     log("identity saved");
+    connectDeviceWs();
   }
 
   async function publishPresent() {
@@ -191,6 +246,48 @@
     log("no session became active (peer may not have accepted)");
   }
 
+
+  async function acquireLocalStream() {
+    // Prefer real camera; Android WebView on http://10.0.2.2 may lack mediaDevices.
+    try {
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        try {
+          return await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: "environment" },
+            audio: true,
+          });
+        } catch (e1) {
+          log("getUserMedia av failed: " + e1.message + " — video only");
+          return await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        }
+      }
+    } catch (e) {
+      log("mediaDevices unavailable: " + e.message);
+    }
+    // Lab fallback: canvas stream so WebRTC still negotiates A/V tracks
+    log("using LAB canvas stream (no camera API on this WebView origin)");
+    const c = document.createElement("canvas");
+    c.width = 640;
+    c.height = 480;
+    const ctx = c.getContext("2d");
+    let frame = 0;
+    const draw = () => {
+      frame++;
+      ctx.fillStyle = "#1a2744";
+      ctx.fillRect(0, 0, 640, 480);
+      ctx.fillStyle = "#7eb6ff";
+      ctx.font = "bold 36px sans-serif";
+      ctx.fillText("CanisLink LAB CAM", 120, 220);
+      ctx.fillStyle = "#fff";
+      ctx.font = "20px sans-serif";
+      ctx.fillText("dog portal frame " + frame, 200, 270);
+      requestAnimationFrame(draw);
+    };
+    draw();
+    if (c.captureStream) return c.captureStream(15);
+    throw new Error("no getUserMedia and no canvas.captureStream");
+  }
+
   async function startWebRtc(isOfferer) {
     if (state.pc) {
       try { state.pc.close(); } catch (_) {}
@@ -201,18 +298,7 @@
     state.pc = pc;
 
     // local camera/mic — phone IS the dog portal hardware
-    try {
-      state.localStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" },
-        audio: true,
-      });
-    } catch (e) {
-      log("getUserMedia failed, trying video-only: " + e.message);
-      state.localStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: false,
-      });
-    }
+    state.localStream = await acquireLocalStream();
     $("localVideo").srcObject = state.localStream;
     for (const track of state.localStream.getTracks()) {
       pc.addTrack(track, state.localStream);
@@ -349,7 +435,8 @@
   if (params.get("api")) state.api = params.get("api");
   if (params.get("signal")) state.signal = params.get("signal");
   loadForm();
-  log("portal ready (phone = dog camera+screen)");
+  connectDeviceWs();
+  log("portal ready (phone = dog camera+screen + WS push)");
   (async function autostart() {
     const params = new URLSearchParams(location.search);
     if (params.get("autostart") !== "1") return;

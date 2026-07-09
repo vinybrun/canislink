@@ -1,11 +1,19 @@
-//! Device API — presence, invites, sessions, config, media handshake.
+//! Device API — presence, invites, sessions, config, media handshake, device WS.
+
+mod events;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Path, Query, State,
+    },
     http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
+use events::{DeviceEvent, EventHub};
+use futures_util::{SinkExt, StreamExt};
 use chrono::Utc;
 use clap::Parser;
 use db::{sqlite, AppData};
@@ -57,6 +65,7 @@ struct AppState {
     auth: SharedSecretAuthority,
     steward_secret: String,
     pool: Option<SqlitePool>,
+    events: EventHub,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
         auth: SharedSecretAuthority::new(args.device_secret),
         steward_secret: args.steward_secret,
         pool,
+        events: EventHub::new(),
     };
     let tick_data = state.data.clone();
     let tick_pool = state.pool.clone();
@@ -147,6 +157,7 @@ fn router(state: AppState) -> Router {
         .route("/v1/dev/enroll", post(dev_enroll))
         .route("/v1/dev/bonds", post(dev_bootstrap_bond))
         .route("/v1/config", get(get_config))
+        .route("/v1/ws", get(device_ws))
         .route("/v1/invites", post(create_invite))
         .route("/v1/invites/incoming", get(incoming_invite))
         .route("/v1/invites/{invite_id}/cancel", post(cancel_invite))
@@ -418,6 +429,16 @@ async fn create_invite(
         let _ = sqlite::record_invite_event(pool, body.dog_id, now).await;
     }
     info!(from = %invite.from_dog, to = %invite.to_dog, id = %invite.id, "invite ringing");
+    state
+        .events
+        .publish(
+            invite.to_dog,
+            DeviceEvent::InviteRinging {
+                invite: invite.clone(),
+                lure_led: "slow_pulse_blue".into(),
+            },
+        )
+        .await;
     Ok(Json(CreateInviteResponse { invite }))
 }
 
@@ -519,6 +540,15 @@ async fn accept_invite_handler(
     }
     let role = webrtc_role(&session, dog_id).to_string();
     info!(session = %session.id, dog = %dog_id, %role, "session negotiating");
+    state
+        .events
+        .publish_many(
+            &[session.dog_a, session.dog_b],
+            DeviceEvent::SessionUpdated {
+                session: session.clone(),
+            },
+        )
+        .await;
     Ok(Json(AcceptInviteResponse {
         session,
         webrtc_role: role,
@@ -550,6 +580,18 @@ async fn end_session(
     };
     if sess.dog_a != body.dog_id && sess.dog_b != body.dog_id {
         return Err(err(StatusCode::FORBIDDEN, "not party"));
+    }
+    if let Some(sess) = state.data.sessions.get(id) {
+        state
+            .events
+            .publish_many(
+                &[sess.dog_a, sess.dog_b],
+                DeviceEvent::SessionEnded {
+                    session_id: id.to_string(),
+                    reason: format!("{:?}", body.reason),
+                },
+            )
+            .await;
     }
     state.data.sessions.end(id);
     if let Some(pool) = &state.pool {
@@ -753,4 +795,68 @@ async fn steward_policy(
     }
     state.data.policies.set(p);
     Ok(StatusCode::NO_CONTENT)
+}
+
+
+/// Device realtime channel: `GET /v1/ws?dog_id=&terminal_id=` with Device auth header.
+/// Query also accepts `token=` for WebView clients that cannot set WS headers easily.
+async fn device_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, StatusCode> {
+    let dog_id = DogId(
+        Uuid::parse_str(q.get("dog_id").ok_or(StatusCode::BAD_REQUEST)?)
+            .map_err(|_| StatusCode::BAD_REQUEST)?,
+    );
+    let terminal_id = TerminalId(
+        Uuid::parse_str(q.get("terminal_id").ok_or(StatusCode::BAD_REQUEST)?)
+            .map_err(|_| StatusCode::BAD_REQUEST)?,
+    );
+    let token = if let Ok((_, t)) = extract_device_token(&headers) {
+        t
+    } else {
+        q.get("token").cloned().ok_or(StatusCode::UNAUTHORIZED)?
+    };
+    state
+        .auth
+        .verify_pair(terminal_id, dog_id, &token)
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    Ok(ws.on_upgrade(move |socket| device_ws_loop(socket, state, dog_id)))
+}
+
+async fn device_ws_loop(socket: WebSocket, state: AppState, dog_id: DogId) {
+    let mut rx = state.events.subscribe(dog_id).await;
+    let (mut sink, mut stream) = socket.split();
+    // greet
+    let hello = serde_json::json!({"event": "hello", "dog_id": dog_id});
+    let _ = sink
+        .send(Message::Text(hello.to_string().into()))
+        .await;
+
+    let mut send_task = tokio::spawn(async move {
+        while let Ok(ev) = rx.recv().await {
+            if let Ok(text) = serde_json::to_string(&ev) {
+                if sink.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    let mut recv_task = tokio::spawn(async move {
+        while let Some(Ok(msg)) = stream.next().await {
+            match msg {
+                Message::Text(t) if t.contains("ping") => {}
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    });
+
+    tokio::select! {
+        _ = &mut send_task => recv_task.abort(),
+        _ = &mut recv_task => send_task.abort(),
+    }
 }

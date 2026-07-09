@@ -4,6 +4,8 @@ import android.Manifest;
 import android.annotation.SuppressLint;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.util.Log;
+import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
@@ -15,12 +17,25 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
 /**
- * Phone = dog video terminal.
- * Loads CanisLink portal WebRTC page; camera/mic for dog-facing call.
+ * Phone = dog video terminal (camera + screen).
+ * WebView loads portal; CanisBridge logs events for adb logcat e2e.
  */
 public class MainActivity extends AppCompatActivity {
+    private static final String TAG = "CanisLink";
     private static final int REQ = 42;
     private WebView web;
+
+    public class CanisBridge {
+        @JavascriptInterface
+        public void log(String msg) {
+            Log.i(TAG, "portal: " + msg);
+        }
+
+        @JavascriptInterface
+        public void event(String name, String detail) {
+            Log.i(TAG, "event name=" + name + " detail=" + detail);
+        }
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -33,31 +48,52 @@ public class MainActivity extends AppCompatActivity {
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
         s.setMediaPlaybackRequiresUserGesture(false);
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+            s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        }
+        WebView.setWebContentsDebuggingEnabled(true);
         s.setAllowFileAccess(true);
         s.setAllowContentAccess(true);
 
-        web.setWebViewClient(new WebViewClient());
+        web.addJavascriptInterface(new CanisBridge(), "CanisBridge");
+        web.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                Log.i(TAG, "page_finished url=" + url);
+                // bridge portal log() to Android
+                String safeUrl = url.replace("\\", "\\\\").replace("'", "\\'");
+                view.evaluateJavascript(
+                    "(function(){if(window.CanisBridge){var el=document.getElementById('log');"
+                    + "var obs=new MutationObserver(function(){CanisBridge.log(el?el.textContent.slice(0,300):'');});"
+                    + "if(el)obs.observe(el,{childList:true,characterData:true,subtree:true});"
+                    + "CanisBridge.event('page_ready','" + safeUrl + "');}})();",
+                    null
+                );
+            }
+        });
         web.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onPermissionRequest(final PermissionRequest request) {
                 runOnUiThread(() -> request.grant(request.getResources()));
             }
+            @Override
+            public boolean onConsoleMessage(android.webkit.ConsoleMessage consoleMessage) {
+                Log.i(TAG, "console: " + consoleMessage.message());
+                return true;
+            }
         });
 
         ensurePerms();
-        // 10.0.2.2 = host loopback from Android emulator
         String url = getIntent().getStringExtra("portal_url");
         if (url == null || url.isEmpty()) {
             url = "http://10.0.2.2:18080/portal/";
         }
+        Log.i(TAG, "loading " + url);
         web.loadUrl(url);
     }
 
     private void ensurePerms() {
-        String[] need = {
-            Manifest.permission.CAMERA,
-            Manifest.permission.RECORD_AUDIO
-        };
+        String[] need = {Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO};
         boolean missing = false;
         for (String p : need) {
             if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) {
@@ -73,10 +109,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        // reload so getUserMedia can proceed
-        if (requestCode == REQ) {
-            web.reload();
-        }
+        if (requestCode == REQ && web != null) web.reload();
     }
 
     @Override

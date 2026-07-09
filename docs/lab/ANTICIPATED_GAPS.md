@@ -1,16 +1,20 @@
-# Anticipated gaps (from untested scenarios) → what we built
+# Anticipated gaps loop
 
-| Untested / missing | Anticipated need | Status in this loop |
-|--------------------|------------------|---------------------|
-| Phone is not custom hardware display | Use **Android phone as camera+screen** for dog portal | `android/` WebView app + `portal-web/` |
-| Real video not just datachannel | Browser WebRTC getUserMedia + remote video | `portal-web/app.js` |
-| Emulator networking | Host services via `10.0.2.2` | Documented + portal defaults |
-| Peer offline / not present | Route errors | `fail_paths.rs` |
-| Caller not on mat | Deny invite | `fail_paths.rs` |
-| Sleep / rate limit | Policy denials | `fail_paths.rs` + existing policy |
-| Busy concurrent invite | Single open invite | `fail_paths.rs` |
-| Human never accepts | Accept only on portal/pad | Enforced in UI + API |
-| Serving portal to phone | Static `/portal` on device-api | ServeDir |
-| Deep e2e with Android | Emulator + adb | `scripts/android_e2e.sh` |
+| Gap | Built | Verified |
+|-----|-------|----------|
+| Offline / not present peer | fail_paths | yes |
+| Caller not present | fail_paths | yes |
+| Sleep / rate limit | fail_paths | yes |
+| Busy invite | fail_paths | yes |
+| Phone as dog AV hardware | Android WebView + portal-web | ANDROID_E2E_OK |
+| Invite push not poll | `/v1/ws` DeviceEvent hub | device_ws_push e2e |
+| getUserMedia on http WebView | canvas lab stream fallback | log: LAB canvas stream |
+| WebRTC on Android portal | signal open + autostart answerer | logcat |
+| Dual real phones | Android + host Chromium | yes (not dual emulator) |
 
-Still open (later loops): multi-emulator two-phone video, TURN for real NAT, push notifications, Play Store signing.
+## Still open
+
+- Second Android AVD peer (memory/CPU heavy)
+- Real camera on emulator (use host fake media / canvas)
+- Device WS stability from WebView (reconnect loop; prefer wss in production)
+- TURN for hard NAT

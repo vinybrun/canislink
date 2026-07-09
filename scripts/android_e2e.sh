@@ -89,22 +89,30 @@ MR=$(curl -sf -X POST "$API/v1/sessions/${SESS}/media_ready" \
 BOTH=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('both_ready'))" "$MR")
 
 PORTAL_B="http://10.0.2.2:${API_PORT}/portal/?api=http://10.0.2.2:${API_PORT}&signal=ws://10.0.2.2:${SIG_PORT}&token=${TOKEN_B}&terminalId=${TERM_B}&dogId=${DOG_B}&session=${SESS}&role=answerer&autostart=1"
+adb logcat -c || true
 adb shell am force-stop com.canislink.portal || true
-adb shell am start -n com.canislink.portal/.MainActivity --es portal_url "$PORTAL_B"
-sleep 4
+# Quote carefully so & in query string is not eaten by adb shell
+adb shell am start -n com.canislink.portal/.MainActivity --es portal_url "'${PORTAL_B}'"
+sleep 6
 
 PORTAL_A="http://127.0.0.1:${API_PORT}/portal/?api=http://127.0.0.1:${API_PORT}&signal=ws://127.0.0.1:${SIG_PORT}&token=${TOKEN_A}&terminalId=${TERM_A}&dogId=${DOG_A}&session=${SESS}&role=offerer&autostart=1"
 CHROME=$(command -v chromium-browser || command -v chromium)
 $CHROME --headless=new --disable-gpu --use-fake-ui-for-media-stream --use-fake-device-for-media-stream \
   --user-data-dir=/tmp/chrome-canis-a-e2e --remote-debugging-port=9222 \
   "$PORTAL_A" > /tmp/chrome-a.log 2>&1 &
-sleep 6
+sleep 8
 
 ACTIVE=$(curl -sf "$API/v1/sessions/active?dog_id=${DOG_A}&terminal_id=${TERM_A}" \
   -H "Authorization: Device ${TERM_A}:${TOKEN_A}")
 APP_TOP=$(adb shell dumpsys activity activities | grep -E 'topResumedActivity' | head -1 || true)
 mkdir -p docs/lab
+LOGCAT=$(adb logcat -d -s CanisLink:I 2>/dev/null | tail -80 || true)
+echo "$LOGCAT" | tail -30
 adb exec-out screencap -p > docs/lab/android-screencap.png || true
+PAGE_OK=$(echo "$LOGCAT" | grep -c page_finished || true)
+WS_OK=$(echo "$LOGCAT" | grep -ciE 'device WS|ws open|portal ready' || true)
+PC_OK=$(echo "$LOGCAT" | grep -ciE 'pc connected|connectionstate|sent offer|sent answer|got answer|remote track' || true)
+
 
 python3 - << PY
 import json
@@ -126,7 +134,12 @@ report = {
   "screenshot": "docs/lab/android-screencap.png",
   "architecture_shift": "Android phone is dog camera+screen instead of custom AV hardware",
   "fail_paths": "tests/e2e/tests/fail_paths.rs",
+  "android_page_finished_logs": int("""$PAGE_OK""".strip() or "0"),
+  "android_portal_log_hits": int("""$WS_OK""".strip() or "0"),
+  "android_webrtc_log_hits": int("""$PC_OK""".strip() or "0"),
+  "device_ws_push": "enabled on /v1/ws",
 }
+report["android_page_loaded"] = report["android_page_finished_logs"] > 0
 open("$REPORT", "w").write(json.dumps(report, indent=2))
 print(json.dumps(report, indent=2))
 if not report["ok"] or not report["android_app_resumed"]:

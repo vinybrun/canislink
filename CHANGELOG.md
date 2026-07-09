@@ -20,3 +20,10 @@ Lab-shippable software kit (SQLite, steward, WebRTC datachannel).
 ## 0.1.0-alpha
 
 Control plane prototype.
+
+## 0.3.1-android-lab — 2026-07-09
+
+- Device WebSocket invite/session push (`GET /v1/ws`)
+- Portal uses WS push + canvas lab camera fallback for Android WebView
+- Android CanisBridge logcat hooks; URL quoting fixed for deep links
+- device_ws_push e2e test

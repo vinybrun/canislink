@@ -34,3 +34,4 @@ parking_lot = { workspace = true }
 sqlx = { workspace = true }
 sha2 = "0.10"
 hex = "0.4"
+futures-util = { workspace = true }

@@ -1,9 +1,9 @@
 {
   "ok": true,
-  "session_id": "2a4148e8-6859-4d25-8a11-133f19b7cce4",
-  "invite_id": "29aac38a-9438-42cd-932a-e9f040c7a3d3",
-  "dog_a": "41eb396a-6d4e-4421-9016-168db20714d0",
-  "dog_b": "2018a303-5780-404a-9920-640b48a4dc2a",
+  "session_id": "e8302195-989d-4c5e-9bed-2f4eb7ccb4af",
+  "invite_id": "26db48b3-0dfb-477a-a29a-ad4beb3d57b2",
+  "dog_a": "f81b6c3f-7048-42bc-aef3-8a84138e3be2",
+  "dog_b": "5060b902-b643-4c9a-bd1f-5533874c0c91",
   "both_media_ready": true,
   "session_state": "active",
   "android_device": "emulator-5554",
@@ -13,5 +13,10 @@
   "apk": "/work/android/app/build/outputs/apk/debug/app-debug.apk",
   "screenshot": "docs/lab/android-screencap.png",
   "architecture_shift": "Android phone is dog camera+screen instead of custom AV hardware",
-  "fail_paths": "tests/e2e/tests/fail_paths.rs"
+  "fail_paths": "tests/e2e/tests/fail_paths.rs",
+  "android_page_finished_logs": 1,
+  "android_portal_log_hits": 37,
+  "android_webrtc_log_hits": 0,
+  "device_ws_push": "enabled on /v1/ws",
+  "android_page_loaded": true
 }
