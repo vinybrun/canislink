@@ -1,6 +1,7 @@
 //! Device API — presence, invites, sessions, config, media handshake, device WS.
 
 mod events;
+mod ice;
 
 use axum::{
     extract::{
@@ -13,6 +14,7 @@ use axum::{
     Json, Router,
 };
 use events::{DeviceEvent, EventHub};
+use ice::IcePolicy;
 use tokio::sync::broadcast;
 use futures_util::{SinkExt, StreamExt};
 use chrono::Utc;
@@ -22,7 +24,7 @@ use device_auth::SharedSecretAuthority;
 use policy::{invite_rate_ok, social_allowed, PolicyDeny};
 use protocol::{
     AcceptInviteResponse, AgainResponse, ConfigV1, CreateInviteResponse, DogId, EndSessionRequest,
-    FeatureFlags, IceConfig, IncomingInviteOffer, InviteId, LureConfig, MediaReadyResponse, PadMap,
+    FeatureFlags, IncomingInviteOffer, InviteId, LureConfig, MediaReadyResponse, PadMap,
     PresenceReport, PresenceView, SessionId, SessionState, TerminalId,
 };
 use serde::{Deserialize, Serialize};
@@ -58,6 +60,31 @@ struct Args {
     /// Skip SQLite (CI / unit-style process tests)
     #[arg(long, env = "CANIS_EPHEMERAL", default_value_t = false)]
     ephemeral: bool,
+    /// Comma-separated STUN URLs distributed via GET /v1/config
+    #[arg(
+        long,
+        env = "CANIS_STUN_URLS",
+        default_value = "stun:stun.l.google.com:19302"
+    )]
+    stun_urls: String,
+    /// Comma-separated TURN URIs (e.g. turn:host:3478?transport=udp)
+    #[arg(long, env = "CANIS_TURN_URIS", default_value = "")]
+    turn_uris: String,
+    /// Static TURN username (ignored when CANIS_TURN_SECRET is set)
+    #[arg(long, env = "CANIS_TURN_USERNAME", default_value = "")]
+    turn_username: String,
+    /// Static TURN credential
+    #[arg(long, env = "CANIS_TURN_CREDENTIAL", default_value = "")]
+    turn_credential: String,
+    /// Coturn use-auth-secret shared secret → mint ephemeral REST credentials
+    #[arg(long, env = "CANIS_TURN_SECRET", default_value = "")]
+    turn_secret: String,
+    /// ICE credential TTL seconds
+    #[arg(long, env = "CANIS_ICE_TTL_SEC", default_value_t = 3600)]
+    ice_ttl_sec: u64,
+    /// Advertise force_turn feature (clients use iceTransportPolicy=relay)
+    #[arg(long, env = "CANIS_FORCE_TURN", default_value_t = false)]
+    force_turn: bool,
 }
 
 #[derive(Clone)]
@@ -67,6 +94,7 @@ struct AppState {
     steward_secret: String,
     pool: Option<SqlitePool>,
     events: EventHub,
+    ice: IcePolicy,
 }
 
 #[derive(Debug, Serialize)]
@@ -93,12 +121,32 @@ async fn main() -> anyhow::Result<()> {
         info!(db = %args.database_url, "durable SQLite enabled");
         Some(pool)
     };
+    let ice = IcePolicy::from_parts(
+        &args.stun_urls,
+        &args.turn_uris,
+        &args.turn_username,
+        &args.turn_credential,
+        &args.turn_secret,
+        args.ice_ttl_sec,
+        args.force_turn,
+    );
+    if !ice.turn_uris.is_empty() {
+        info!(
+            turn = ?ice.turn_uris,
+            rest = !ice.turn_secret.is_empty(),
+            force = ice.force_turn,
+            "ICE TURN configured for /v1/config"
+        );
+    } else {
+        info!("ICE STUN-only (set CANIS_TURN_URIS for relay)");
+    }
     let state = AppState {
         data: data.clone(),
         auth: SharedSecretAuthority::new(args.device_secret),
         steward_secret: args.steward_secret,
         pool,
         events: EventHub::new(),
+        ice,
     };
     let tick_data = state.data.clone();
     let tick_pool = state.pool.clone();
@@ -335,6 +383,9 @@ async fn get_config(
     let terminal_id = TerminalId(q.terminal_id);
     verify_device(&state, &headers, terminal_id, dog_id).map_err(|s| err(s, "unauthorized"))?;
     let p = state.data.policies.get(dog_id);
+    let ice = state.ice.mint(&dog_id.0.to_string());
+    let mut features = FeatureFlags::default();
+    features.force_turn = state.ice.force_turn;
     Ok(Json(ConfigV1 {
         dog_id,
         terminal_id,
@@ -348,8 +399,8 @@ async fn get_config(
         segment_sec: p.segment_sec,
         lure: LureConfig::default(),
         pad_map: PadMap::default(),
-        ice: IceConfig::default(),
-        features: FeatureFlags::default(),
+        ice,
+        features,
     }))
 }
 

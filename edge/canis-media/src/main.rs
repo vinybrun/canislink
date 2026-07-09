@@ -42,6 +42,23 @@ struct Args {
     role: String,
     #[arg(long, default_value_t = 45)]
     timeout_sec: u64,
+    /// Comma-separated STUN URLs (lab default: Google public STUN)
+    #[arg(
+        long,
+        env = "CANIS_STUN_URLS",
+        default_value = "stun:stun.l.google.com:19302"
+    )]
+    stun_urls: String,
+    /// Comma-separated TURN URIs
+    #[arg(long, env = "CANIS_TURN_URIS", default_value = "")]
+    turn_uris: String,
+    #[arg(long, env = "CANIS_TURN_USERNAME", default_value = "")]
+    turn_username: String,
+    #[arg(long, env = "CANIS_TURN_CREDENTIAL", default_value = "")]
+    turn_credential: String,
+    /// When set, use only TURN relay (hard-NAT lab mode)
+    #[arg(long, env = "CANIS_FORCE_TURN", default_value_t = false)]
+    force_turn: bool,
 }
 
 #[tokio::main]
@@ -61,7 +78,17 @@ async fn main() -> anyhow::Result<()> {
     let dog = DogId(args.dog);
     let offerer = args.role == "offerer";
 
-    let pc = new_peer().await?;
+    let ice_servers = build_ice_servers(
+        &args.stun_urls,
+        &args.turn_uris,
+        &args.turn_username,
+        &args.turn_credential,
+    );
+    if args.force_turn {
+        info!("force_turn enabled (prefer relay; RTC config ice_transport_policy not fully enforced by webrtc-rs 0.11)");
+    }
+    info!(?ice_servers, "ICE servers");
+    let pc = new_peer(ice_servers).await?;
     let (connected_tx, connected_rx) = tokio::sync::oneshot::channel::<()>();
     let connected_tx = Arc::new(tokio::sync::Mutex::new(Some(connected_tx)));
     {
@@ -207,7 +234,47 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn new_peer() -> anyhow::Result<Arc<RTCPeerConnection>> {
+fn split_csv(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn build_ice_servers(
+    stun: &str,
+    turn_uris: &str,
+    username: &str,
+    credential: &str,
+) -> Vec<RTCIceServer> {
+    let mut out = Vec::new();
+    let stun_urls = split_csv(stun);
+    if !stun_urls.is_empty() {
+        out.push(RTCIceServer {
+            urls: stun_urls,
+            ..Default::default()
+        });
+    }
+    let turn = split_csv(turn_uris);
+    if !turn.is_empty() {
+        out.push(RTCIceServer {
+            urls: turn,
+            username: username.to_owned(),
+            credential: credential.to_owned(),
+            ..Default::default()
+        });
+    }
+    if out.is_empty() {
+        out.push(RTCIceServer {
+            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+            ..Default::default()
+        });
+    }
+    out
+}
+
+async fn new_peer(ice_servers: Vec<RTCIceServer>) -> anyhow::Result<Arc<RTCPeerConnection>> {
     let mut m = MediaEngine::default();
     m.register_default_codecs()?;
     let mut registry = Registry::new();
@@ -217,10 +284,7 @@ async fn new_peer() -> anyhow::Result<Arc<RTCPeerConnection>> {
         .with_interceptor_registry(registry)
         .build();
     let config = RTCConfiguration {
-        ice_servers: vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-            ..Default::default()
-        }],
+        ice_servers,
         ..Default::default()
     };
     Ok(Arc::new(api.new_peer_connection(config).await?))

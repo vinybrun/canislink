@@ -11,10 +11,11 @@
 | getUserMedia on http WebView | canvas lab stream fallback | log: LAB canvas stream |
 | WebRTC on Android portal | signal open + autostart answerer | logcat |
 | Dual real phones | Android + host Chromium | yes (not dual emulator) |
+| Device WS stability | keepalive + exponential reconnect | device_ws_push + portal |
+| TURN / hard NAT | `/v1/config` ICE + coturn REST + portal iceServers | ice_config e2e |
 
 ## Still open
 
 - Second Android AVD peer (memory/CPU heavy)
 - Real camera on emulator (use host fake media / canvas)
-- Device WS stability from WebView (reconnect loop; prefer wss in production)
-- TURN for hard NAT
+- Production TURN fleet / TURNS (TLS) / credential rotation ops

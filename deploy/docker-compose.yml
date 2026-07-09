@@ -1,4 +1,4 @@
-# CanisLink alpha ship stack (control plane)
+# CanisLink alpha ship stack (control plane + lab TURN)
 services:
   device-api:
     build:
@@ -8,9 +8,15 @@ services:
     environment:
       CANIS_DEVICE_SECRET: canis-dev-secret
       CANIS_STEWARD_SECRET: canis-steward-secret
+      # Host-visible TURN from containers / emulators; override for real NAT
+      CANIS_STUN_URLS: stun:stun.l.google.com:19302
+      CANIS_TURN_URIS: turn:coturn:3478?transport=udp
+      CANIS_TURN_SECRET: canis-lab-turn-secret
       RUST_LOG: device_api=info
     ports:
       - "8080:8080"
+    depends_on:
+      - coturn
   signaling:
     build:
       context: ..
@@ -18,3 +24,10 @@ services:
     command: ["signaling", "--bind", "0.0.0.0:8081"]
     ports:
       - "8081:8081"
+  coturn:
+    image: coturn/coturn:4.6.2
+    network_mode: host
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    # host network: UDP 3478 + relay range reachable for real devices

@@ -295,13 +295,63 @@
     throw new Error("no getUserMedia and no canvas.captureStream");
   }
 
+  async function fetchIceConfig() {
+    // Prefer cloud-distributed ICE (STUN + optional TURN) so NAT lab path works.
+    const fallback = {
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      iceTransportPolicy: "all",
+    };
+    if (!state.token || !state.dogId || !state.terminalId) return fallback;
+    try {
+      const q = new URLSearchParams({
+        dog_id: state.dogId,
+        terminal_id: state.terminalId,
+      });
+      const r = await fetch(`${state.api}/v1/config?${q}`, {
+        headers: authHeaders(),
+      });
+      if (!r.ok) throw new Error("config " + r.status);
+      const cfg = await r.json();
+      const ice = cfg.ice || {};
+      const iceServers = [];
+      for (const u of ice.stun_urls || []) {
+        if (u) iceServers.push({ urls: u });
+      }
+      if (ice.turn_uris && ice.turn_uris.length) {
+        iceServers.push({
+          urls: ice.turn_uris,
+          username: ice.turn_username || "",
+          credential: ice.turn_credential || "",
+        });
+        log(
+          "ICE TURN from config (" +
+            ice.turn_uris.length +
+            " uri, ttl=" +
+            (ice.ttl_sec || "?") +
+            "s)"
+        );
+      } else {
+        log("ICE STUN-only from config (" + (ice.stun_urls || []).length + " url)");
+      }
+      if (!iceServers.length) return fallback;
+      const forceTurn = !!(cfg.features && cfg.features.force_turn);
+      if (forceTurn) log("ICE force_turn → iceTransportPolicy=relay");
+      return {
+        iceServers,
+        iceTransportPolicy: forceTurn ? "relay" : "all",
+      };
+    } catch (e) {
+      log("config ICE fetch failed: " + e.message + " — using public STUN");
+      return fallback;
+    }
+  }
+
   async function startWebRtc(isOfferer) {
     if (state.pc) {
       try { state.pc.close(); } catch (_) {}
     }
-    const pc = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-    });
+    const rtcCfg = await fetchIceConfig();
+    const pc = new RTCPeerConnection(rtcCfg);
     state.pc = pc;
 
     // local camera/mic — phone IS the dog portal hardware
