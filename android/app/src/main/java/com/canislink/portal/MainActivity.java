@@ -74,7 +74,18 @@ public class MainActivity extends AppCompatActivity {
         web.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onPermissionRequest(final PermissionRequest request) {
-                runOnUiThread(() -> request.grant(request.getResources()));
+                // Grant WebRTC camera/mic capture inside WebView (after runtime perms).
+                runOnUiThread(() -> {
+                    String[] res = request.getResources();
+                    StringBuilder sb = new StringBuilder();
+                    for (String r : res) {
+                        if (sb.length() > 0) sb.append(',');
+                        sb.append(r);
+                    }
+                    Log.i(TAG, "webview_permission_request resources=" + sb);
+                    request.grant(res);
+                    Log.i(TAG, "webview_permission_granted");
+                });
             }
             @Override
             public boolean onConsoleMessage(android.webkit.ConsoleMessage consoleMessage) {
@@ -86,9 +97,12 @@ public class MainActivity extends AppCompatActivity {
         ensurePerms();
         String url = getIntent().getStringExtra("portal_url");
         if (url == null || url.isEmpty()) {
-            url = "http://10.0.2.2:18080/portal/";
+            // Prefer loopback (secure context for getUserMedia) when host used adb reverse.
+            // Fallback: 10.0.2.2 is the emulator→host alias but is NOT a secure context.
+            url = "http://127.0.0.1:18080/portal/";
         }
         Log.i(TAG, "loading " + url);
+        Log.i(TAG, "hint: use adb reverse tcp:18080 tcp:18080 for getUserMedia secure context");
         web.loadUrl(url);
     }
 

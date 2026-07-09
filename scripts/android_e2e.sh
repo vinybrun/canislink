@@ -63,6 +63,12 @@ adb install -r "$APK" >/dev/null
 adb shell pm grant com.canislink.portal android.permission.CAMERA || true
 adb shell pm grant com.canislink.portal android.permission.RECORD_AUDIO || true
 
+# Secure context for getUserMedia: loopback via adb reverse (10.0.2.2 is NOT secure).
+echo "==> adb reverse for secure-context portal"
+adb reverse tcp:${API_PORT} tcp:${API_PORT} || true
+adb reverse tcp:${SIG_PORT} tcp:${SIG_PORT} || true
+adb reverse --list || true
+
 present() {
   curl -sf -X POST "$API/v1/presence" \
     -H "Authorization: Device $2:$3" -H 'Content-Type: application/json' \
@@ -88,12 +94,13 @@ MR=$(curl -sf -X POST "$API/v1/sessions/${SESS}/media_ready" \
   -d "{\"dog_id\":\"$DOG_B\",\"terminal_id\":\"$TERM_B\",\"ready\":true}")
 BOTH=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('both_ready'))" "$MR")
 
-PORTAL_B="http://10.0.2.2:${API_PORT}/portal/?api=http://10.0.2.2:${API_PORT}&signal=ws://10.0.2.2:${SIG_PORT}&token=${TOKEN_B}&terminalId=${TERM_B}&dogId=${DOG_B}&session=${SESS}&role=answerer&autostart=1"
+# 127.0.0.1 is a secure context → mediaDevices.getUserMedia available on WebView
+PORTAL_B="http://127.0.0.1:${API_PORT}/portal/?api=http://127.0.0.1:${API_PORT}&signal=ws://127.0.0.1:${SIG_PORT}&token=${TOKEN_B}&terminalId=${TERM_B}&dogId=${DOG_B}&session=${SESS}&role=answerer&autostart=1"
 adb logcat -c || true
 adb shell am force-stop com.canislink.portal || true
 # Quote carefully so & in query string is not eaten by adb shell
 adb shell am start -n com.canislink.portal/.MainActivity --es portal_url "'${PORTAL_B}'"
-sleep 6
+sleep 10
 
 PORTAL_A="http://127.0.0.1:${API_PORT}/portal/?api=http://127.0.0.1:${API_PORT}&signal=ws://127.0.0.1:${SIG_PORT}&token=${TOKEN_A}&terminalId=${TERM_A}&dogId=${DOG_A}&session=${SESS}&role=offerer&autostart=1"
 CHROME=$(command -v chromium-browser || command -v chromium)
@@ -112,12 +119,18 @@ adb exec-out screencap -p > docs/lab/android-screencap.png || true
 PAGE_OK=$(echo "$LOGCAT" | grep -c page_finished || true)
 WS_OK=$(echo "$LOGCAT" | grep -ciE 'device WS|ws open|portal ready' || true)
 PC_OK=$(echo "$LOGCAT" | grep -ciE 'pc connected|connectionstate|sent offer|sent answer|got answer|remote track' || true)
+# MEDIA_PATH=getUserMedia means real camera API; lab_canvas is fallback
+MEDIA_GUM=$(echo "$LOGCAT" | grep -c 'MEDIA_PATH=getUserMedia' || true)
+MEDIA_LAB=$(echo "$LOGCAT" | grep -c 'MEDIA_PATH=lab_canvas' || true)
+SECURE_HIT=$(echo "$LOGCAT" | grep -ciE 'isSecureContext=true' || true)
 
 
 python3 - << PY
 import json
 active = json.loads('''$ACTIVE''')
 both = '''$BOTH''' in ("True", "true", True)
+media_gum = int("""$MEDIA_GUM""".strip() or "0")
+media_lab = int("""$MEDIA_LAB""".strip() or "0")
 report = {
   "ok": bool(active and active.get("id") == "$SESS") and both,
   "session_id": "$SESS",
@@ -126,9 +139,9 @@ report = {
   "dog_b": "$DOG_B",
   "both_media_ready": both,
   "session_state": active.get("state") if active else None,
-  "android_device": "emulator-5554",
+  "android_device": "emulator",
   "android_app_resumed": "com.canislink.portal" in '''$APP_TOP''',
-  "portal_url_android": "autostart answerer via 10.0.2.2",
+  "portal_url_android": "autostart answerer via adb reverse 127.0.0.1 (secure context)",
   "host_peer": "chromium headless offerer with fake media",
   "apk": "$APK",
   "screenshot": "docs/lab/android-screencap.png",
@@ -137,12 +150,18 @@ report = {
   "android_page_finished_logs": int("""$PAGE_OK""".strip() or "0"),
   "android_portal_log_hits": int("""$WS_OK""".strip() or "0"),
   "android_webrtc_log_hits": int("""$PC_OK""".strip() or "0"),
+  "media_path_getUserMedia_hits": media_gum,
+  "media_path_lab_canvas_hits": media_lab,
+  "secure_context_true_hits": int("""$SECURE_HIT""".strip() or "0"),
   "device_ws_push": "enabled on /v1/ws",
+  "ice_config": "GET /v1/config STUN/TURN",
 }
 report["android_page_loaded"] = report["android_page_finished_logs"] > 0
+# Prefer real getUserMedia when reverse+perms work; canvas still counts as session-ok
+report["media_path"] = "getUserMedia" if media_gum > 0 else ("lab_canvas" if media_lab > 0 else "unknown")
 open("$REPORT", "w").write(json.dumps(report, indent=2))
 print(json.dumps(report, indent=2))
 if not report["ok"] or not report["android_app_resumed"]:
     raise SystemExit("ANDROID_E2E incomplete: " + json.dumps(report))
-print("ANDROID_E2E_OK")
+print("ANDROID_E2E_OK media_path=" + report["media_path"])
 PY

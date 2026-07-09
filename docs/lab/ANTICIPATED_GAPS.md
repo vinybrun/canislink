@@ -14,8 +14,10 @@
 | Device WS stability | keepalive + exponential reconnect | device_ws_push + portal |
 | TURN / hard NAT | `/v1/config` ICE + coturn REST + portal iceServers | ice_config e2e |
 
+| Emulator camera API path | adb reverse + 127.0.0.1 secure context + virtualscene | MEDIA_PATH=getUserMedia in logcat |
+
 ## Still open
 
 - Second Android AVD peer (memory/CPU heavy)
-- Real camera on emulator (use host fake media / canvas)
 - Production TURN fleet / TURNS (TLS) / credential rotation ops
+- Physical multi-phone field trial

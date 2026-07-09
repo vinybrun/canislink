@@ -254,25 +254,69 @@
   }
 
 
-  async function acquireLocalStream() {
-    // Prefer real camera; Android WebView on http://10.0.2.2 may lack mediaDevices.
+  function mediaPathReport(path, detail) {
+    log("MEDIA_PATH=" + path + (detail ? " " + detail : ""));
     try {
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      if (window.CanisBridge && CanisBridge.event) {
+        CanisBridge.event("media_path", path + (detail ? "|" + detail : ""));
+      }
+    } catch (_) {}
+  }
+
+  async function acquireLocalStream() {
+    // Real camera requires a secure context (https or http://127.0.0.1 / localhost).
+    // Prefer adb reverse → http://127.0.0.1:PORT over http://10.0.2.2 (not secure).
+    const params = new URLSearchParams(location.search);
+    const forceLab = params.get("lab_cam") === "1";
+    const secure = !!window.isSecureContext;
+    const hasMd = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+    log(
+      "media probe isSecureContext=" +
+        secure +
+        " mediaDevices=" +
+        hasMd +
+        " origin=" +
+        location.origin
+    );
+
+    if (!forceLab && hasMd) {
+      try {
+        // enumerate helps surface emulator virtual cameras in logs
         try {
-          return await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: "environment" },
+          const devs = await navigator.mediaDevices.enumerateDevices();
+          const cams = devs.filter((d) => d.kind === "videoinput").length;
+          const mics = devs.filter((d) => d.kind === "audioinput").length;
+          log("enumerateDevices video=" + cams + " audio=" + mics);
+        } catch (en) {
+          log("enumerateDevices: " + en.message);
+        }
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: "environment" }, width: { ideal: 640 }, height: { ideal: 480 } },
             audio: true,
           });
+          mediaPathReport("getUserMedia", "av tracks=" + stream.getTracks().length);
+          return stream;
         } catch (e1) {
-          log("getUserMedia av failed: " + e1.message + " — video only");
-          return await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          log("getUserMedia av failed: " + e1.name + " " + e1.message + " — video only");
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: false,
+          });
+          mediaPathReport("getUserMedia", "video-only tracks=" + stream.getTracks().length);
+          return stream;
         }
+      } catch (e) {
+        log("getUserMedia failed: " + e.name + " " + e.message);
       }
-    } catch (e) {
-      log("mediaDevices unavailable: " + e.message);
+    } else if (!hasMd) {
+      log(
+        "mediaDevices unavailable (need secure context — use adb reverse + http://127.0.0.1 or HTTPS)"
+      );
     }
-    // Lab fallback: canvas stream so WebRTC still negotiates A/V tracks
-    log("using LAB canvas stream (no camera API on this WebView origin)");
+
+    // Lab fallback: canvas stream so WebRTC still negotiates tracks without a camera API
+    mediaPathReport("lab_canvas", forceLab ? "forced" : "fallback");
     const c = document.createElement("canvas");
     c.width = 640;
     c.height = 480;
