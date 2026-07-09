@@ -13,6 +13,7 @@ use axum::{
     Json, Router,
 };
 use events::{DeviceEvent, EventHub};
+use tokio::sync::broadcast;
 use futures_util::{SinkExt, StreamExt};
 use chrono::Utc;
 use clap::Parser;
@@ -798,8 +799,8 @@ async fn steward_policy(
 }
 
 
-/// Device realtime channel: `GET /v1/ws?dog_id=&terminal_id=` with Device auth header.
-/// Query also accepts `token=` for WebView clients that cannot set WS headers easily.
+
+/// Device realtime channel: `GET /v1/ws?dog_id=&terminal_id=&token=`
 async fn device_ws(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
@@ -827,36 +828,61 @@ async fn device_ws(
 }
 
 async fn device_ws_loop(socket: WebSocket, state: AppState, dog_id: DogId) {
+    use std::time::{SystemTime, UNIX_EPOCH};
     let mut rx = state.events.subscribe(dog_id).await;
     let (mut sink, mut stream) = socket.split();
-    // greet
-    let hello = serde_json::json!({"event": "hello", "dog_id": dog_id});
-    let _ = sink
-        .send(Message::Text(hello.to_string().into()))
-        .await;
 
-    let mut send_task = tokio::spawn(async move {
-        while let Ok(ev) = rx.recv().await {
-            if let Ok(text) = serde_json::to_string(&ev) {
-                if sink.send(Message::Text(text.into())).await.is_err() {
+    let hello = DeviceEvent::Hello { dog_id };
+    if let Ok(text) = serde_json::to_string(&hello) {
+        if sink.send(Message::Text(text.into())).await.is_err() {
+            return;
+        }
+    }
+
+    let mut ping = tokio::time::interval(std::time::Duration::from_secs(15));
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = ping.tick() => {
+                let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+                let ev = DeviceEvent::Ping { ts_ms: ts };
+                if let Ok(text) = serde_json::to_string(&ev) {
+                    if sink.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                // also protocol-level ping
+                if sink.send(Message::Ping(vec![1,2,3].into())).await.is_err() {
                     break;
                 }
             }
-        }
-    });
-
-    let mut recv_task = tokio::spawn(async move {
-        while let Some(Ok(msg)) = stream.next().await {
-            match msg {
-                Message::Text(t) if t.contains("ping") => {}
-                Message::Close(_) => break,
-                _ => {}
+            ev = rx.recv() => {
+                match ev {
+                    Ok(event) => {
+                        if let Ok(text) = serde_json::to_string(&event) {
+                            if sink.send(Message::Text(text.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+            msg = stream.next() => {
+                match msg {
+                    Some(Ok(Message::Text(t))) => {
+                        if t.contains("ping") {
+                            let _ = sink.send(Message::Text(r#"{"event":"pong"}"#.into())).await;
+                        }
+                    }
+                    Some(Ok(Message::Pong(_))) | Some(Ok(Message::Ping(_))) => {}
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(_)) => break,
+                    _ => {}
+                }
             }
         }
-    });
-
-    tokio::select! {
-        _ = &mut send_task => recv_task.abort(),
-        _ = &mut recv_task => send_task.abort(),
     }
 }

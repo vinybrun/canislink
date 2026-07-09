@@ -1,5 +1,4 @@
-//! Device realtime events (invite push, session updates).
-//! Replaces poll-only lure path for phones / Android portal.
+//! Device realtime events (invite push, session updates, keepalive).
 
 use protocol::{DogId, Invite, SessionRecord};
 use serde::{Deserialize, Serialize};
@@ -10,11 +9,12 @@ use tokio::sync::{broadcast, RwLock};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum DeviceEvent {
+    Hello { dog_id: DogId },
     InviteRinging { invite: Invite, lure_led: String },
     InviteClosed { invite_id: String, reason: String },
     SessionUpdated { session: SessionRecord },
     SessionEnded { session_id: String, reason: String },
-    Ping,
+    Ping { ts_ms: u64 },
 }
 
 #[derive(Clone, Default)]
@@ -29,11 +29,9 @@ impl EventHub {
 
     pub async fn subscribe(&self, dog: DogId) -> broadcast::Receiver<DeviceEvent> {
         let mut map = self.inner.write().await;
-        let tx = map
-            .entry(dog)
-            .or_insert_with(|| broadcast::channel(64).0)
-            .clone();
-        tx.subscribe()
+        map.entry(dog)
+            .or_insert_with(|| broadcast::channel(128).0)
+            .subscribe()
     }
 
     pub async fn publish(&self, dog: DogId, event: DeviceEvent) {

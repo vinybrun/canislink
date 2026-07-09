@@ -40,58 +40,65 @@
     $("dogId").value = state.dogId;
   }
 
+
   let deviceWs = null;
+  let deviceWsTimer = null;
+  let deviceWsBackoff = 1000;
+  function deviceWsUrl() {
+    const u = new URL(state.api);
+    u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+    u.pathname = "/v1/ws";
+    u.search = "";
+    u.searchParams.set("dog_id", state.dogId);
+    u.searchParams.set("terminal_id", state.terminalId);
+    u.searchParams.set("token", state.token);
+    return u.toString();
+  }
   function connectDeviceWs() {
     if (!state.token || !state.dogId || !state.terminalId) return;
-    if (deviceWs) try { deviceWs.close(); } catch (_) {}
-    const base = state.api.replace(/^http/, "ws");
-    const q = new URLSearchParams({
-      dog_id: state.dogId,
-      terminal_id: state.terminalId,
-      token: state.token,
-    });
-    const url = `${base}/v1/ws?${q}`;
+    if (deviceWs && (deviceWs.readyState === 0 || deviceWs.readyState === 1)) return;
+    try { if (deviceWs) deviceWs.close(); } catch (_) {}
+    const url = deviceWsUrl();
     deviceWs = new WebSocket(url);
-    deviceWs.onopen = () => log("device WS open (invite push)");
-    deviceWs.onclose = () => {
-      log("device WS closed — reconnect in 2s");
-      setTimeout(connectDeviceWs, 2000);
+    deviceWs.onopen = () => {
+      deviceWsBackoff = 1000;
+      log("device WS open (invite push)");
+      deviceWs.send(JSON.stringify({ type: "ping" }));
     };
     deviceWs.onerror = () => log("device WS error");
+    deviceWs.onclose = () => {
+      log("device WS closed — reconnect in " + deviceWsBackoff + "ms");
+      clearTimeout(deviceWsTimer);
+      deviceWsTimer = setTimeout(connectDeviceWs, deviceWsBackoff);
+      deviceWsBackoff = Math.min(deviceWsBackoff * 2, 15000);
+    };
     deviceWs.onmessage = (ev) => {
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
-      if (msg.event === "invite_ringing" || msg.event === "InviteRinging") {
-        // serde externally tagged: {"event":"invite_ringing","invite":...}
+      const event = msg.event;
+      if (event === "ping" || event === "hello" || event === "pong") {
+        if (event === "hello") log("device WS hello");
+        if (event === "ping") deviceWs.send(JSON.stringify({ type: "pong" }));
+        return;
       }
-      // handle both external tag styles
-      const event = msg.event || Object.keys(msg)[0];
-      const body = msg.invite ? msg : msg[event] || msg;
-      if (event === "invite_ringing" || msg.invite) {
-        const inv = msg.invite || body.invite;
-        if (inv) {
-          state.invite = inv;
-          setUx("ringing_in");
-          $("btnAccept").disabled = false;
-          log("PUSH lure invite from " + inv.from_dog);
-          document.body.style.outline = "4px solid #2f6fed";
-          setTimeout(() => (document.body.style.outline = ""), 1000);
-        }
-      } else if (event === "session_updated" || msg.session) {
-        const sess = msg.session || body.session;
-        if (sess) {
-          state.session = sess;
-          $("sessionId").textContent = sess.id;
-          log("PUSH session " + sess.id + " " + sess.state);
-        }
+      if (event === "invite_ringing" && msg.invite) {
+        state.invite = msg.invite;
+        setUx("ringing_in");
+        $("btnAccept").disabled = false;
+        log("PUSH lure invite from " + msg.invite.from_dog);
+        document.body.style.outline = "4px solid #2f6fed";
+        setTimeout(() => (document.body.style.outline = ""), 1000);
+      } else if (event === "session_updated" && msg.session) {
+        state.session = msg.session;
+        $("sessionId").textContent = msg.session.id;
+        log("PUSH session " + msg.session.id + " " + msg.session.state);
       } else if (event === "session_ended") {
         log("PUSH session ended");
         setUx("idle");
-      } else if (msg.event === "hello") {
-        log("device WS hello");
       }
     };
   }
+
 
   function saveForm() {
     state.api = $("apiBase").value.trim().replace(/\/$/, "");
